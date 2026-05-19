@@ -1,0 +1,42 @@
+code: gh-projects
+name: "GH Projects Integration"
+description: "GitHub Projects v2 integration for BMAD — sync stories to issues and sprint statuses to project boards"
+default_selected: false
+
+header: "GitHub Projects Integration"
+subheader: "Connect your BMAD sprint tracking to a GitHub Projects v2 board.\nStory creation and sprint planning will automatically sync to your project board."
+
+ghe_host:
+  prompt: "GitHub hostname (github.com or your GHE instance)"
+  default: "github.com"
+  result: "{value}"
+
+gh_org:
+  prompt: "GitHub organization that owns the project board"
+  result: "{value}"
+
+gh_repo:
+  prompt: "Repository in org/repo format (e.g., my-org/my-repo)"
+  result: "{value}"
+
+gh_project_number:
+  prompt: "GitHub Projects board number (from the URL)"
+  result: "{value}"
+
+directories:
+  - "{project-root}/_bmad-modules/gh-projects/data"
+
+requirements:
+  - tool: python3
+    min_version: "3.11"
+    required: true
+    stdlib_modules: [json, tomllib, pathlib]
+    why: "resolve_customization.py uses tomllib (3.11+) and json"
+  - tool: gh
+    min_version: "2.0"
+    required: true
+    auth_check: "gh auth status or GH_TOKEN/GITHUB_TOKEN env var"
+    why: "GitHub Projects sync requires authenticated gh CLI"
+  - tool: jq
+    required: false
+    why: "JSON processing fallback when Python unavailable"

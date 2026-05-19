@@ -1,0 +1,16 @@
+# Workflow customization surface for gh-sync-sprint.
+
+[workflow]
+
+activation_steps_prepend = [
+  "Run preflight check: `sh {project-root}/_bmad-modules/gh-projects/preflight.sh` — halt on FAIL status",
+]
+activation_steps_append = []
+
+persistent_facts = [
+  "NEVER use #N patterns (like #1, #2) in GitHub issue bodies — they auto-link to other issues. Use (AC 1), (Task 2), or plain numbers instead.",
+  "NEVER set the Priority field automatically — it is a sprint planning decision.",
+  "file:{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml",
+]
+
+on_complete = ""
