@@ -42,11 +42,6 @@ Load config from `{project-root}/_bmad/bmm/config.yaml` and resolve `project_nam
 
 Load `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`.
 
-**If this file does not exist**, run the setup workflow:
-1. Read module config from `{project-root}/_bmad/gh-projects/config.yaml` to get `ghe_host`, `gh_org`, `gh_repo`, `gh_project_number`
-2. Use `gh project view` and `gh project field-list` to discover project ID, field IDs, and status option IDs
-3. Write the discovered config to `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`
-
 ## Execution
 
 <workflow>
@@ -62,20 +57,36 @@ Load `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`.
   <action>Build a lookup map: issue_title → {item_id, issue_number, current_status}</action>
 </step>
 
-<step n="2" goal="Identify sync actions needed">
+<step n="2" goal="Detect content drift and identify sync actions">
+  <action>Load `{project-root}/_bmad-modules/gh-projects/data/sync-state.yaml` if it exists</action>
+
   <action>For each story in sprint-status.yaml:</action>
   <action>1. Parse story_key into epic_num, story_num, story_slug</action>
   <action>2. Search project items for matching issue (title contains "Story {epic_num}.{story_num}:")</action>
-  <action>3. Determine action needed:
-    - **CREATE**: No matching issue exists → needs issue creation + project add
-    - **UPDATE_STATUS**: Issue exists but board status differs from sprint status
-    - **SKIP**: Issue exists and status matches
+  <action>3. If a local story file exists at `{implementation_artifacts}/{story_key}.md`:
+    - Compute its SHA-256: `sha256sum {file_path}`
+    - Compare against `local_hash` in sync-state.yaml for this story_key
+    - If different → mark as **LOCAL_DRIFT** (story edited since last sync)
   </action>
-  <action>Build action list and report planned changes before executing</action>
+  <action>4. If a matching issue exists on the board:
+    - Fetch its body: `gh issue view {issue_number} --repo {repo} --json body --jq '.body'`
+    - Compute SHA-256 of the body
+    - Compare against `remote_hash` in sync-state.yaml for this story_key
+    - If different → mark as **REMOTE_DRIFT** (issue edited on GitHub since last sync)
+  </action>
+  <action>5. Determine action needed:
+    - **CREATE**: No matching issue exists → needs issue creation + project add
+    - **UPDATE_CONTENT**: Local story changed (LOCAL_DRIFT) but remote unchanged → re-push story to issue
+    - **REMOTE_EDITED**: Remote changed (REMOTE_DRIFT) but local unchanged → warn user, skip unless forced
+    - **CONFLICT**: Both local and remote changed → warn user, require manual review
+    - **UPDATE_STATUS**: Issue exists, content in sync, but board status differs from sprint status
+    - **SKIP**: Issue exists, content in sync, status matches
+  </action>
+  <action>Build action list and report planned changes (including drift warnings) before executing</action>
 </step>
 
 <step n="3" goal="Execute sync actions">
-  <critical>NEVER use hash-number patterns like #1, #2 in issue bodies — they auto-link. Use (AC 1), (Task 2) instead.</critical>
+  <critical>NEVER use #N patterns in issue bodies — they auto-link. Use (AC 1), (Task 2) instead.</critical>
 
   <action>For CREATE actions:</action>
   <action>1. Check if a story file exists at `{implementation_artifacts}/{story_key}.md`</action>
@@ -92,13 +103,24 @@ Load `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`.
   <action>Never set Priority field automatically</action>
 </step>
 
-<step n="4" goal="Report results">
+<step n="4" goal="Record sync hashes for drift detection">
+  <action>For every story that was created or had content pushed in this run:</action>
+  <action>Compute SHA-256 of local story file via `sha256sum` (null if no file on disk)</action>
+  <action>Fetch issue body via `gh issue view` and compute its SHA-256</action>
+  <action>Write or update the entry in `sync-state.yaml` with local_hash, remote_hash, issue_number, last_synced</action>
+  <action>Update the top-level `last_synced` timestamp in sync-state.yaml</action>
+</step>
+
+<step n="5" goal="Report results">
   <action>Summarize sync results:</action>
   <action>- Issues created: N</action>
   <action>- Statuses updated: N</action>
+  <action>- Content re-synced (local drift): N</action>
+  <action>- Remote edits detected (skipped): N</action>
+  <action>- Conflicts requiring manual review: N</action>
   <action>- Already in sync: N</action>
   <action>- Errors: N (with details)</action>
-  <action>Report any issues that could not be synced and why</action>
+  <action>Report any drift warnings with story keys and issue numbers</action>
 </step>
 
 </workflow>

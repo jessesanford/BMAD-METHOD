@@ -42,11 +42,6 @@ Load config from `{project-root}/_bmad/bmm/config.yaml` and resolve `project_nam
 
 Load `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml` — this contains all project board IDs, field mappings, and status option IDs.
 
-**If this file does not exist**, run the setup workflow:
-1. Read module config from `{project-root}/_bmad/gh-projects/config.yaml` to get `ghe_host`, `gh_org`, `gh_repo`, `gh_project_number`
-2. Use `gh project view` and `gh project field-list` to discover project ID, field IDs, and status option IDs
-3. Write the discovered config to `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`
-
 ## Input
 
 This skill expects one of:
@@ -70,7 +65,7 @@ This skill expects one of:
   <action>Load GH project config for org, repo, project_number, project_id</action>
 
   <action>Search for existing issue matching this story:
-    `gh issue list --repo {repo} --search "Story {epic_num}.{story_num}:" --json number,title,body --limit 5`
+    `gh issue list --repo {org}/{repo} --search "Story {epic_num}.{story_num}:" --json number,title,body --limit 5`
   </action>
 
   <check if="matching issue found">
@@ -133,7 +128,25 @@ This skill expects one of:
     `gh project item-edit --project-id {project_id} --id {item_id} --field-id {status_field_id} --single-select-option-id {status_option_id}`
   </action>
 
-  <action>Report: "Synced Story {epic_num}.{story_num} → Issue number {issue_number}, Status: {status}"</action>
+  <action>Report: "Synced Story {epic_num}.{story_num} → Issue #{issue_number}, Status: {status}"</action>
+</step>
+
+<step n="5" goal="Record sync hashes for drift detection">
+  <action>Load `{project-root}/_bmad-modules/gh-projects/data/sync-state.yaml`</action>
+  <action>Compute SHA-256 of the local story file (the .md file on disk):
+    `sha256sum {story_file_path}` — extract the hex digest
+  </action>
+  <action>Fetch the issue body just written and compute its SHA-256:
+    `gh issue view {issue_number} --repo {repo} --json body --jq '.body'` — pipe through `sha256sum`
+  </action>
+  <action>Update the entry for this story_key under `stories:` in sync-state.yaml:
+    - `issue_number`: the GitHub issue number
+    - `local_hash`: SHA-256 of the local story file (null if no file)
+    - `remote_hash`: SHA-256 of the GitHub issue body
+    - `last_synced`: current ISO timestamp
+  </action>
+  <action>Update top-level `last_synced` timestamp</action>
+  <action>Write the updated sync-state.yaml back to disk</action>
 </step>
 
 </workflow>
