@@ -69,8 +69,8 @@ Load `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`.
     - If different → mark as **LOCAL_DRIFT** (story edited since last sync)
   </action>
   <action>4. If a matching issue exists on the board:
-    - Fetch its body: `gh issue view {issue_number} --repo {repo} --json body --jq '.body'`
-    - Compute SHA-256 of the body
+    - Fetch its body and compute SHA-256 using the canonical method (strip trailing newline):
+      `printf '%s' "$(gh issue view {issue_number} --repo {repo} --json body --jq '.body')" | sha256sum`
     - Compare against `remote_hash` in sync-state.yaml for this story_key
     - If different → mark as **REMOTE_DRIFT** (issue edited on GitHub since last sync)
   </action>
@@ -106,7 +106,7 @@ Load `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`.
 <step n="4" goal="Record sync hashes for drift detection">
   <action>For every story that was created or had content pushed in this run:</action>
   <action>Compute SHA-256 of local story file via `sha256sum` (null if no file on disk)</action>
-  <action>Fetch issue body via `gh issue view` and compute its SHA-256</action>
+  <action>Fetch issue body via `gh issue view` and compute its SHA-256 using `printf '%s'` to strip trailing newline</action>
   <action>Write or update the entry in `sync-state.yaml` with local_hash, remote_hash, issue_number, last_synced</action>
   <action>Update the top-level `last_synced` timestamp in sync-state.yaml</action>
 </step>

@@ -137,7 +137,8 @@ This skill expects one of:
     `sha256sum {story_file_path}` — extract the hex digest
   </action>
   <action>Fetch the issue body just written and compute its SHA-256:
-    `gh issue view {issue_number} --repo {repo} --json body --jq '.body'` — pipe through `sha256sum`
+    `printf '%s' "$(gh issue view {issue_number} --repo {repo} --json body --jq '.body')" | sha256sum`
+    Use `printf '%s'` to strip the trailing newline before hashing — this is the canonical method for all sync-state hashes.
   </action>
   <action>Update the entry for this story_key under `stories:` in sync-state.yaml:
     - `issue_number`: the GitHub issue number
