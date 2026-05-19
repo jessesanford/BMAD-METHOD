@@ -107,7 +107,7 @@ Load `{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml`.
   <action>For every story that was created or had content pushed in this run:</action>
   <action>Compute SHA-256 of local story file via `sha256sum` (null if no file on disk)</action>
   <action>Fetch issue body via `gh issue view` and compute its SHA-256 using `printf '%s'` to strip trailing newline</action>
-  <action>Write or update the entry in `sync-state.yaml` with local_hash, remote_hash, issue_number, last_synced</action>
+  <action>Write or update the entry in `sync-state.yaml` with local_hash, remote_hash, hash_version (from top-level), issue_number, last_synced</action>
   <action>Update the top-level `last_synced` timestamp in sync-state.yaml</action>
 </step>
 

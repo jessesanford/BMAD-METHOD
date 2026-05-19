@@ -144,6 +144,7 @@ This skill expects one of:
     - `issue_number`: the GitHub issue number
     - `local_hash`: SHA-256 of the local story file (null if no file)
     - `remote_hash`: SHA-256 of the GitHub issue body
+    - `hash_version`: copy from the top-level `hash_version` in sync-state.yaml
     - `last_synced`: current ISO timestamp
   </action>
   <action>Update top-level `last_synced` timestamp</action>
