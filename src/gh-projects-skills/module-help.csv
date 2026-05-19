@@ -1,0 +1,4 @@
+module,skill,display-name,menu-code,description,action,args,phase,preceded-by,followed-by,required,output-location,outputs
+GH Projects,_meta,,,,,,,,,false,,
+GH Projects,gh-sync-story,Sync Story to GitHub,GSS,Sync a BMAD story file to its GitHub issue and update project board status.,activate,story_key,4-implementation,bmad-create-story,,false,,synced issue
+GH Projects,gh-sync-sprint,Sync Sprint to GitHub,GSP,Bulk-sync all sprint statuses from sprint-status.yaml to GitHub Projects board.,activate,,4-implementation,bmad-sprint-planning,,false,,sync report

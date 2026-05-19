@@ -1,0 +1,21 @@
+# DO NOT EDIT -- overwritten on every update.
+#
+# Workflow customization surface for gh-sync-story. Mirrors the
+# agent customization shape under the [workflow] namespace.
+
+[workflow]
+
+# --- Configurable below. Overrides merge per BMad structural rules: ---
+#   scalars: override wins • arrays (persistent_facts, activation_steps_*): append
+#   arrays-of-tables with `code`/`id`: replace matching items, append new ones.
+
+activation_steps_prepend = []
+activation_steps_append = []
+
+persistent_facts = [
+  "NEVER use #N patterns (like #1, #2) in GitHub issue bodies — they auto-link to other issues. Use (AC 1), (Task 2), or plain numbers instead.",
+  "NEVER set the Priority field automatically — it is a sprint planning decision.",
+  "file:{project-root}/_bmad-modules/gh-projects/data/gh-project-config.yaml",
+]
+
+on_complete = ""

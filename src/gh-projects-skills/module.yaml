@@ -1,0 +1,27 @@
+code: gh-projects
+name: "GH Projects Integration"
+description: "GitHub Projects v2 integration for BMAD — sync stories to issues and sprint statuses to project boards"
+default_selected: false
+
+header: "GitHub Projects Integration"
+subheader: "Connect your BMAD sprint tracking to a GitHub Projects v2 board.\nStory creation and sprint planning will automatically sync to your project board."
+
+ghe_host:
+  prompt: "GitHub hostname (github.com or your GHE instance)"
+  default: "github.com"
+  result: "{value}"
+
+gh_org:
+  prompt: "GitHub organization that owns the project board"
+  result: "{value}"
+
+gh_repo:
+  prompt: "Repository in org/repo format (e.g., my-org/my-repo)"
+  result: "{value}"
+
+gh_project_number:
+  prompt: "GitHub Projects board number (from the URL)"
+  result: "{value}"
+
+directories:
+  - "{project-root}/_bmad-modules/gh-projects/data"
