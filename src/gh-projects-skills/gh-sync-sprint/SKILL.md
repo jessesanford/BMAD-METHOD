@@ -18,6 +18,16 @@ description: 'Sync all BMAD sprint statuses to GitHub Projects board. Use after 
 
 ## On Activation
 
+### Step 0: Preflight Check
+
+Run: `sh {project-root}/_bmad-modules/gh-projects/preflight.sh`
+
+Parse the output. If the final `PREFLIGHT:` line shows `status=FAIL`:
+- Report each `CHECK:` line with `status=FAIL` to the user, including the `reason` field
+- **Halt activation.** Do not proceed to Step 1.
+
+If `status=OK` (even with warnings), proceed normally. If the preflight script is not found, skip this step.
+
 ### Step 1: Resolve the Workflow Block
 
 Run: `python3 {project-root}/_bmad/scripts/resolve_customization.py --skill {skill-root} --key workflow`

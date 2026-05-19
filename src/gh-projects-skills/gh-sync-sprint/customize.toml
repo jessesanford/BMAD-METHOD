@@ -1,15 +1,10 @@
-# DO NOT EDIT -- overwritten on every update.
-#
-# Workflow customization surface for gh-sync-sprint. Mirrors the
-# agent customization shape under the [workflow] namespace.
+# Workflow customization surface for gh-sync-sprint.
 
 [workflow]
 
-# --- Configurable below. Overrides merge per BMad structural rules: ---
-#   scalars: override wins • arrays (persistent_facts, activation_steps_*): append
-#   arrays-of-tables with `code`/`id`: replace matching items, append new ones.
-
-activation_steps_prepend = []
+activation_steps_prepend = [
+  "Run preflight check: `sh {project-root}/_bmad-modules/gh-projects/preflight.sh` — halt on FAIL status",
+]
 activation_steps_append = []
 
 persistent_facts = [

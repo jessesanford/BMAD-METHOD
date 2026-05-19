@@ -25,3 +25,18 @@ gh_project_number:
 
 directories:
   - "{project-root}/_bmad-modules/gh-projects/data"
+
+requirements:
+  - tool: python3
+    min_version: "3.11"
+    required: true
+    stdlib_modules: [json, tomllib, pathlib]
+    why: "resolve_customization.py uses tomllib (3.11+) and json"
+  - tool: gh
+    min_version: "2.0"
+    required: true
+    auth_check: "gh auth status or GH_TOKEN/GITHUB_TOKEN env var"
+    why: "GitHub Projects sync requires authenticated gh CLI"
+  - tool: jq
+    required: false
+    why: "JSON processing fallback when Python unavailable"
