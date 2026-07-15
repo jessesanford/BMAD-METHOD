@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 MARKER = "<!-- bmad-stack-navigation:v1 -->"
 
@@ -77,6 +77,31 @@ def load_manifest(path: Path) -> dict[str, Any]:
     if manifest.get("schema_version") != 1 or not manifest.get("layers"):
         raise SubmitError("manifest requires schema_version 1 and non-empty layers")
     return manifest
+
+
+def load_manual_links(path: Path | None, layer_count: int) -> dict[int, dict[str, Any]]:
+    if path is None:
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SubmitError(f"cannot read manual PR links: {exc}") from exc
+    links: dict[int, dict[str, Any]] = {}
+    for item in payload.get("prs", []):
+        position = item.get("position")
+        number = item.get("number")
+        url = item.get("url")
+        if (
+            not isinstance(position, int)
+            or not 1 <= position <= layer_count
+            or not isinstance(number, int)
+            or number < 1
+            or not isinstance(url, str)
+            or not url.startswith(("https://", "http://"))
+        ):
+            raise SubmitError("manual PR links require valid position, number, and URL fields")
+        links[position - 1] = {"number": number, "url": url}
+    return links
 
 
 def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -179,6 +204,106 @@ def write_journal(path: Path | None, payload: dict[str, Any]) -> None:
 def remote_sha(repo: Path, remote: str, branch: str) -> str | None:
     output = git(repo, "ls-remote", "--heads", remote, f"refs/heads/{branch}")
     return output.split()[0] if output else None
+
+
+def verify_published_layers(repo: Path, manifest: dict[str, Any], layers: list[dict[str, Any]]) -> None:
+    output = git(repo, "ls-remote", "--heads", manifest["publish_remote"])
+    published = {
+        ref.removeprefix("refs/heads/"): sha
+        for line in output.splitlines()
+        for sha, ref in [line.split(maxsplit=1)]
+    }
+    for layer in layers:
+        if published.get(layer["remote_branch"]) != layer["_tip"]:
+            raise SubmitError(f"remote branch SHA mismatch: {layer['remote_branch']}")
+
+
+def repository_web_url(repository: str) -> str:
+    host, owner, name = split_repository(repository)
+    return f"https://{host or 'github.com'}/{owner}/{name}"
+
+
+def render_manual_instructions(
+    manifest: dict[str, Any],
+    layers: list[dict[str, Any]],
+    links: dict[int, dict[str, Any]],
+    manifest_path: Path,
+    destination: Path,
+    links_path: Path,
+    output: Path | None,
+) -> str:
+    lines = [
+        "# Manual stacked PR submission",
+        "",
+        f"**Repository:** `{manifest['repository']}`  ",
+        f"**First base:** `{manifest['default_base']}`  ",
+        f"**PR count:** {len(layers)}",
+        "",
+        "## Submit in this order",
+        "",
+        "Create the PRs from top to bottom. For each row, copy the numbered title file into the",
+        "GitHub title field and the matching body file into the description field. The body files",
+        "use the same template and stack graph as automatic submission.",
+        "",
+        "| # | Base | Head | Title | Body | Create | PR |",
+        "|---:|---|---|---|---|---|---|",
+    ]
+    web_url = repository_web_url(manifest["repository"])
+    for index, layer in enumerate(layers):
+        position = index + 1
+        base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
+        head = layer["remote_branch"]
+        create_url = f"{web_url}/compare/{quote(base, safe='/')}...{quote(head, safe='/')}?expand=1"
+        pr = links.get(index)
+        pr_link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
+        lines.append(
+            f"| {position} | `{base}` | `{head}` | `{position:02d}-title.txt` | "
+            f"`{position:02d}-body.md` | [Open form]({create_url}) | {pr_link} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Command-line alternative",
+            "",
+            "Run each command from this package directory, in numeric order:",
+            "",
+            "```bash",
+        ]
+    )
+    for index, layer in enumerate(layers):
+        position = index + 1
+        base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
+        lines.append(
+            f'gh pr create --repo "{manifest["repository"]}" --base "{base}" '
+            f'--head "{layer["remote_branch"]}" --title "$(cat {position:02d}-title.txt)" '
+            f'--body-file "{position:02d}-body.md"'
+        )
+    lines.extend(
+        [
+            "```",
+            "",
+            "## Make submitted PRs clickable in later descriptions",
+            "",
+            f"Record each created PR in `{links_path.name}` using its 1-based stack position:",
+            "",
+            "```json",
+            '{"prs":[{"position":1,"number":123,"url":"https://github.example/owner/repo/pull/123"}]}',
+            "```",
+            "",
+            "Then rerun manual packaging. Existing positions become clickable in every regenerated graph;",
+            "future positions remain clearly marked Pending:",
+            "",
+            "```bash",
+            f'uv run "{Path(__file__).resolve()}" "{manifest_path}" --manual '
+            f'--manual-links "{links_path}" --rendered-dir "{destination}"'
+            + (f' --output "{output}"' if output else ""),
+            "```",
+            "",
+            render_navigation(layers, links, None, manifest["default_base"]).rstrip(),
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str, Any]]) -> None:
@@ -291,12 +416,14 @@ def submit(
     repo: Path,
     manifest_path: Path,
     apply: bool,
+    manual: bool,
     output: Path | None,
     rendered_dir: Path | None,
+    manual_links: Path | None,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     layers = validate(repo, manifest_path, manifest)
-    links: dict[int, dict[str, Any]] = {}
+    links = load_manual_links(manual_links, len(layers)) if manual else {}
     journal: dict[str, Any] = {
         "status": "preflight",
         "repository": manifest["repository"],
@@ -307,7 +434,9 @@ def submit(
     destination = rendered_dir or manifest_path.parent / "rendered"
     destination.mkdir(parents=True, exist_ok=True)
     for index, layer in enumerate(layers):
-        body_path = destination / f"{index + 1:02d}-{layer['remote_branch'].replace('/', '-')}.md"
+        title_path = destination / f"{index + 1:02d}-title.txt"
+        body_path = destination / f"{index + 1:02d}-body.md"
+        title_path.write_text(layer["title"] + "\n", encoding="utf-8")
         body_path.write_text(render_body(layers, links, index, manifest["default_base"]), encoding="utf-8")
         journal["layers"].append(
             {
@@ -316,10 +445,35 @@ def submit(
                 "tip": layer["_tip"],
                 "base": manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"],
                 "title": layer["title"],
+                "rendered_title": str(title_path),
                 "rendered_body": str(body_path),
             }
         )
     write_journal(output, journal)
+    if manual:
+        verify_published_layers(repo, manifest, layers)
+        links_path = manual_links or destination / "manual-links.json"
+        if not links_path.exists():
+            links_path.write_text('{\n  "prs": []\n}\n', encoding="utf-8")
+        instructions = destination / "SUBMIT.md"
+        instructions.write_text(
+            render_manual_instructions(
+                manifest,
+                layers,
+                links,
+                manifest_path,
+                destination,
+                links_path,
+                output,
+            ),
+            encoding="utf-8",
+        )
+        journal["status"] = "manual-package"
+        journal["manual_package"] = str(destination)
+        journal["instructions"] = str(instructions)
+        journal["manual_links"] = str(links_path)
+        write_journal(output, journal)
+        return journal
     if not apply:
         journal["status"] = "dry-run"
         write_journal(output, journal)
@@ -400,17 +554,21 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--manual", action="store_true")
     mode.add_argument("--apply", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--rendered-dir", type=Path)
+    parser.add_argument("--manual-links", type=Path)
     args = parser.parse_args()
     try:
         result = submit(
             args.repo.resolve(),
             args.manifest.resolve(),
             args.apply,
+            args.manual,
             args.output.resolve() if args.output else None,
             args.rendered_dir.resolve() if args.rendered_dir else None,
+            args.manual_links.resolve() if args.manual_links else None,
         )
     except SubmitError as exc:
         print(str(exc), file=sys.stderr)

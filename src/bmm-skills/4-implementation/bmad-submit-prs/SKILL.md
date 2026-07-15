@@ -46,6 +46,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>Show the selected remote, repository, base branch, and exact base SHA. If another canonical
   remote exists, show whether its corresponding base has the same SHA; divergence requires explicit
   user confirmation before proceeding.</action>
+  <action>Ask whether to submit automatically or generate a manual submission package, recommending
+  automatic submission by default. Confirm the choice before creating any PR. Both modes use the same
+  titles, upstream template or fallback template, body content, ordering, and stack navigation.</action>
   <critical>Legacy GitHub can show focused chained diffs only when every PR base branch exists in the
   selected repository. A multi-PR fork stack cannot use a branch in one repository as a base in
   another. Therefore publish every PR-ready head to the selected repository, with explicit user
@@ -85,6 +88,16 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
 </step>
 
 <step n="4" goal="Submit or update the stack in dependency order">
+  <check if="the user chose manual submission">
+    Run the script with `--manual` and a dedicated `--rendered-dir`. It must create numbered
+    `NN-title.txt` and `NN-body.md` files, `SUBMIT.md`, `manual-links.json`, and the journal without
+    creating or editing any PR. `SUBMIT.md` gives exact web and `gh` submission instructions, base/head
+    pairs, and review order. Tell the user where the package, instructions, manifest, and journal live.
+    When the user records submitted PR numbers/URLs in `manual-links.json`, rerun with
+    `--manual-links` so prior nodes become clickable while future nodes stay Pending. Then skip the
+    automatic-submission actions below.
+  </check>
+  <check if="the user chose automatic submission">
   <action>After human-visible dry-run approval, run the script with `--apply`. The script preflights all
   remote and GitHub invariants before side effects, publishes exact SHAs with force-with-lease, creates
   the planning PR first, and creates each subsequent PR against the prior upstream-hosted layer.</action>
@@ -100,13 +113,15 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
     partial results without separate approval. When another target is chosen, return to Step 1 with a
     new run directory and leave the prior target unchanged.
   </check>
+  </check>
 </step>
 
 <step n="5" goal="Prove the reviewer experience and hand off safely">
   <action>Query every submitted PR and verify: expected repository, exact head SHA, expected base,
   correct open/draft state, planning link, complete navigation graph, and no unexpected cumulative diff.</action>
-  <action>Report the planning PR first, then a table of all PR numbers, URLs, base/head branches, source
-  SHAs, and statuses. Include the journal path and any temporary upstream branch namespace.</action>
+  <action>For automatic submission, report the planning PR first, then a table of every PR number,
+  clickable URL, base/head branch, source SHA, and status. For manual submission, do not invent a PR
+  summary; report the package, instructions, title/body files, manifest, links file, and journal paths.</action>
   <action>Explain merge order: land from the bottom of the stack upward, then rebase/retarget remaining
   layers as the hosting platform requires. Never delete upstream stack branches until their PRs merge
   or close.</action>

@@ -44,3 +44,11 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 - `body_file` resolves relative to the manifest. It contains the upstream template plus layer-specific
   content. The script appends and updates deterministic stack navigation.
 - Set `draft` when the complete stack should initially avoid normal ready-for-review signaling.
+
+## Manual submission package
+
+Run the same manifest with `--manual --rendered-dir <directory>` to create numbered title/body files,
+`SUBMIT.md`, `manual-links.json`, and a journal without creating PRs. Submit in the order shown in
+`SUBMIT.md`. After creating PRs, add their 1-based `position`, `number`, and `url` to
+`manual-links.json`, then rerun with `--manual-links <file>` to regenerate descriptions whose prior
+stack nodes are clickable and whose future nodes remain Pending.

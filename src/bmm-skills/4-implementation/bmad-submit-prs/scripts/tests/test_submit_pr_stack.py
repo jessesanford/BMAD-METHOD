@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -64,6 +66,47 @@ class SubmitterTests(unittest.TestCase):
             MODULE.parse_remote("git@github.example.com:owner/repo.git"),
             ("github.example.com", "owner", "repo"),
         )
+
+    def test_manual_instructions_include_order_files_and_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            rendered = MODULE.render_manual_instructions(
+                {
+                    "repository": "github.example.com/owner/repo",
+                    "default_base": "main",
+                },
+                self.layers,
+                {0: {"number": 41, "url": "https://github.example.com/owner/repo/pull/41"}},
+                directory / "manifest.json",
+                directory,
+                directory / "manual-links.json",
+                directory / "journal.json",
+            )
+        self.assertIn("01-title.txt", rendered)
+        self.assertIn("02-body.md", rendered)
+        self.assertIn("stack/story-pr-ready", rendered)
+        self.assertIn("[#41](https://github.example.com/owner/repo/pull/41)", rendered)
+        self.assertIn("Pending", rendered)
+
+    def test_manual_links_use_one_based_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "links.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "prs": [
+                            {
+                                "position": 2,
+                                "number": 42,
+                                "url": "https://example.test/pull/42",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            links = MODULE.load_manual_links(path, 2)
+        self.assertEqual(links, {1: {"number": 42, "url": "https://example.test/pull/42"}})
         self.assertEqual(
             MODULE.parse_remote("https://github.example.com/owner/repo.git"),
             ("github.example.com", "owner", "repo"),
