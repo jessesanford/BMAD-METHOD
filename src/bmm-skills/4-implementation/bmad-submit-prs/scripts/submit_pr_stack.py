@@ -12,30 +12,88 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
 MARKER = "<!-- bmad-stack-navigation:v1 -->"
+RETRY_ATTEMPTS = 5
+RETRY_BASE_DELAY_SECONDS = 2
+TRANSIENT_ERROR_MARKERS = (
+    "bad gateway",
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "context deadline exceeded",
+    "could not resolve host",
+    "couldn't connect to server",
+    "empty reply from server",
+    "failed to connect",
+    "http 408",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "i/o timeout",
+    "tls handshake timeout",
+    "remote end hung up unexpectedly",
+    "unexpected eof",
+)
 
 
 class SubmitError(RuntimeError):
     """Submission cannot continue safely."""
 
 
-def run(command: list[str], cwd: Path, input_text: str | None = None) -> str:
-    result = subprocess.run(command, cwd=cwd, text=True, input=input_text, capture_output=True)
-    if result.returncode:
-        raise SubmitError(result.stderr.strip() or f"{' '.join(command)} failed")
-    return result.stdout.strip()
+def is_transient_failure(message: str) -> bool:
+    normalized = message.casefold()
+    return normalized.strip() == "eof" or any(
+        marker in normalized for marker in TRANSIENT_ERROR_MARKERS
+    )
+
+
+def retry_delay(attempt: int, operation: str) -> None:
+    delay = min(RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1), 30)
+    print(
+        f"transient network failure during {operation}; retrying in {delay}s "
+        f"({attempt + 1}/{RETRY_ATTEMPTS})",
+        file=sys.stderr,
+    )
+    time.sleep(delay)
+
+
+def run(
+    command: list[str],
+    cwd: Path,
+    input_text: str | None = None,
+    *,
+    retry_transient: bool = False,
+) -> str:
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        result = subprocess.run(command, cwd=cwd, text=True, input=input_text, capture_output=True)
+        if not result.returncode:
+            return result.stdout.strip()
+        error = result.stderr.strip() or f"{' '.join(command)} failed"
+        if not retry_transient or not is_transient_failure(error) or attempt == RETRY_ATTEMPTS:
+            raise SubmitError(error)
+        retry_delay(attempt, command[0])
+    raise AssertionError("retry loop exhausted")
 
 
 def git(repo: Path, *args: str) -> str:
-    return run(["git", *args], repo)
+    retry_transient = bool(args) and args[0] in {"fetch", "ls-remote"}
+    return run(["git", *args], repo, retry_transient=retry_transient)
 
 
-def gh(repo: Path, repository: str, *args: str) -> str:
-    return run(["gh", *args, "--repo", repository], repo)
+def gh(
+    repo: Path,
+    repository: str,
+    *args: str,
+    retry_transient: bool = True,
+) -> str:
+    return run(["gh", *args, "--repo", repository], repo, retry_transient=retry_transient)
 
 
 def resolve(repo: Path, revision: str) -> str:
@@ -321,13 +379,13 @@ def render_manual_instructions(
 def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str, Any]]) -> None:
     host, owner, name = split_repository(manifest["repository"])
     if host:
-        run(["gh", "auth", "status", "--hostname", host], repo)
+        run(["gh", "auth", "status", "--hostname", host], repo, retry_transient=True)
     endpoint = f"repos/{owner}/{name}"
     permission = ["gh", "api"]
     if host:
         permission.extend(["--hostname", host])
     permission.extend([endpoint, "--jq", ".permissions.push"])
-    if run(permission, repo) != "true":
+    if run(permission, repo, retry_transient=True) != "true":
         raise SubmitError("authenticated user lacks push permission for upstream stack branches")
     repository = manifest["repository"]
     for index, layer in enumerate(layers):
@@ -368,10 +426,30 @@ def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str
 def publish(repo: Path, manifest: dict[str, Any], layer: dict[str, Any]) -> None:
     remote = manifest["publish_remote"]
     old = remote_sha(repo, remote, layer["remote_branch"])
+    if old == layer["_tip"]:
+        return
     lease = f"--force-with-lease=refs/heads/{layer['remote_branch']}:{old or ''}"
-    git(repo, "push", lease, remote, f"{layer['_tip']}:refs/heads/{layer['remote_branch']}")
-    if remote_sha(repo, remote, layer["remote_branch"]) != layer["_tip"]:
-        raise SubmitError(f"published branch SHA mismatch: {layer['remote_branch']}")
+    refspec = f"{layer['_tip']}:refs/heads/{layer['remote_branch']}"
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            git(repo, "push", lease, remote, refspec)
+        except SubmitError as exc:
+            if not is_transient_failure(str(exc)):
+                raise
+            published = remote_sha(repo, remote, layer["remote_branch"])
+            if published == layer["_tip"]:
+                return
+            if published != old:
+                raise SubmitError(
+                    f"remote branch changed during push: {layer['remote_branch']}"
+                ) from exc
+            if attempt == RETRY_ATTEMPTS:
+                raise
+            retry_delay(attempt, "git push")
+            continue
+        if remote_sha(repo, remote, layer["remote_branch"]) != layer["_tip"]:
+            raise SubmitError(f"published branch SHA mismatch: {layer['remote_branch']}")
+        return
 
 
 def verify_pull_request(
@@ -415,13 +493,28 @@ def upsert_navigation_comment(
     if host:
         command.extend(["--hostname", host])
     endpoint = f"repos/{owner}/{name}/issues/{pr['number']}/comments"
-    comments = json.loads(run([*command, f"{endpoint}?per_page=100"], repo) or "[]")
+    comments = json.loads(
+        run([*command, f"{endpoint}?per_page=100"], repo, retry_transient=True) or "[]"
+    )
     match = next((item for item in comments if MARKER in (item.get("body") or "")), None)
     if match:
         comment_endpoint = f"repos/{owner}/{name}/issues/comments/{match['id']}"
-        run([*command, "--method", "PATCH", comment_endpoint, "-f", f"body={body}"], repo)
+        run(
+            [*command, "--method", "PATCH", comment_endpoint, "-f", f"body={body}"],
+            repo,
+            retry_transient=True,
+        )
     else:
-        gh(repo, manifest["repository"], "pr", "comment", pr["url"], "--body", body)
+        gh(
+            repo,
+            manifest["repository"],
+            "pr",
+            "comment",
+            pr["url"],
+            "--body",
+            body,
+            retry_transient=False,
+        )
 
 
 def submit(
@@ -539,7 +632,12 @@ def submit(
                 ]
                 if manifest.get("draft"):
                     arguments.append("--draft")
-                url = gh(repo, manifest["repository"], *arguments).splitlines()[-1]
+                url = gh(
+                    repo,
+                    manifest["repository"],
+                    *arguments,
+                    retry_transient=False,
+                ).splitlines()[-1]
                 number = int(url.rstrip("/").rsplit("/", 1)[-1])
                 pr = {"number": number, "url": url, "state": "OPEN"}
         links[index] = {"number": pr["number"], "url": pr["url"]}

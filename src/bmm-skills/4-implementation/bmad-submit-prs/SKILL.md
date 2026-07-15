@@ -101,9 +101,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>After human-visible dry-run approval, run the script with `--apply`. The script preflights all
   remote and GitHub invariants before side effects, publishes exact SHAs with force-with-lease, creates
   the planning PR first, and creates each subsequent PR against the prior upstream-hosted layer.</action>
-  <action>Reuse an open PR only when its head and base exactly match the manifest. Refuse closed,
-  merged, duplicate, or mismatched PR state. Persist the journal after every successful operation so a
-  retry can resume idempotently.</action>
+  <action>Reuse an open PR only when head and base match; refuse closed, duplicate, or mismatched state.
+  Persist after each success. Retry transient reads and idempotent writes with bounded backoff, but
+  leave ambiguous creates to an idempotent rerun that reconciles remote state from the journal.</action>
   <action>During sequential creation, prior PR titles and graph nodes are clickable and future nodes
   are marked pending. Explain stacked PRs with a link to `https://www.stacking.dev/`. After all PRs
   exist, update every body and one marker comment per PR with the complete linked graph and ordered
