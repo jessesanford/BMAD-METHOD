@@ -41,6 +41,8 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 - `publish_remote` must resolve to that same repository. This requirement is what permits each PR to
   use the prior layer as its GitHub base and show only its focused diff.
 - `branch` is an existing local PR-ready branch; `tip` is its immutable full SHA.
+- `title` uses a conventional prefix. The script inserts `(stacked-pr [N/X])` immediately before its
+  colon in rendered files, navigation, and submitted PR titles.
 - `remote_branch` is the branch published in the upstream repository. Prefer an isolated contributor
   namespace and avoid protected or existing feature branches.
 - The first PR base is `default_base`; each later PR base is the prior `remote_branch`.

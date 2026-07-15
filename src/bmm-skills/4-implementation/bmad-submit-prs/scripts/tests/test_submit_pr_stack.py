@@ -42,7 +42,10 @@ class SubmitterTests(unittest.TestCase):
             "main",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
-        self.assertIn("[docs: plan feature](https://example.test/pull/41)", rendered)
+        self.assertIn(
+            "[docs(stacked-pr [1/2]): plan feature](https://example.test/pull/41)",
+            rendered,
+        )
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
         self.assertIn("Pending", rendered)
         self.assertIn("L1 --> L2", rendered)
@@ -93,6 +96,16 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("Adds opt-in tracing across the migration-agent fleet.", rendered)
         self.assertIn("[Planning PR #41](https://example.test/pull/41)", rendered)
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
+
+    def test_stacked_title_inserts_position_after_conventional_prefix(self) -> None:
+        self.assertEqual(
+            MODULE.stacked_title(
+                {"title": "feat(observability): add tracing"},
+                0,
+                16,
+            ),
+            "feat(observability)(stacked-pr [1/16]): add tracing",
+        )
 
     def test_remote_url_parsing_supports_ssh_and_https(self) -> None:
         self.assertEqual(
@@ -200,6 +213,7 @@ class SubmitterTests(unittest.TestCase):
             {"remote_branch": "stack/story-pr-ready", "title": "feat: story"},
             "stack/plan-pr-ready",
             "/tmp/body.md",
+            "feat(stacked-pr [2/2]): story",
         )
 
         self.assertEqual(pr["number"], 41)

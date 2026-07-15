@@ -66,10 +66,10 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   and record the choice.</action>
   <action>If none exists, use these sections: Summary; Motivation and context; Changes; Testing;
   Risk, rollout, and compatibility; Reviewer guidance; Checklist.</action>
-  <action>Write a feature summary and one body file per layer. The planning PR explains the feature,
-  split, layers, merge order, validation, and reviewer path. Each implementation PR links to the plan,
-  states its place, scopes its changes, names its prerequisite, and gives focused validation and risk
-  notes without repeating the design.</action>
+  <action>Project titles as `<prefix>(stacked-pr [N/X]): <subject>`. Write a feature summary and one
+  body per layer. The planning PR explains the feature, split, merge order, validation, and reviewer
+  path. Each implementation PR links to the plan, scopes its changes and prerequisite, and gives
+  validation and risk notes without repeating the design.</action>
 </step>
 
 <step n="3" goal="Create a fail-closed submission manifest">

@@ -179,6 +179,13 @@ def parse_remote(value: str) -> tuple[str | None, str, str]:
     return parsed.hostname, parts[0], parts[1]
 
 
+def stacked_title(layer: dict[str, Any], index: int, count: int) -> str:
+    prefix, separator, subject = layer["title"].partition(":")
+    if not separator or not prefix.strip() or not subject.strip():
+        raise SubmitError(f"layer title must use a conventional prefix: {layer['title']}")
+    return f"{prefix.strip()}(stacked-pr [{index + 1}/{count}]): {subject.strip()}"
+
+
 def load_manifest(path: Path) -> dict[str, Any]:
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -259,10 +266,15 @@ def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str,
     return layers
 
 
-def node_label(index: int, layer: dict[str, Any], links: dict[int, dict[str, Any]]) -> str:
+def node_label(
+    index: int,
+    layer: dict[str, Any],
+    links: dict[int, dict[str, Any]],
+    count: int,
+) -> str:
     pr = links.get(index)
     prefix = f"#{pr['number']} " if pr else "Pending: "
-    return (prefix + layer["title"]).replace('"', "'")
+    return (prefix + stacked_title(layer, index, count)).replace('"', "'")
 
 
 def render_navigation(
@@ -283,7 +295,7 @@ def render_navigation(
     )
     lines.extend(["```mermaid", "flowchart TD"])
     for index, layer in enumerate(layers):
-        lines.append(f'  L{index + 1}["{node_label(index, layer, links)}"]')
+        lines.append(f'  L{index + 1}["{node_label(index, layer, links, len(layers))}"]')
         if index:
             lines.append(f"  L{index} --> L{index + 1}")
         if index in links:
@@ -293,7 +305,8 @@ def render_navigation(
         base = f"`{default_base}`" if index == 0 else f"`{layers[index - 1]['remote_branch']}`"
         pr = links.get(index)
         link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
-        title = f"[{layer['title']}]({pr['url']})" if pr else f"{layer['title']} (Pending)"
+        rendered_title = stacked_title(layer, index, len(layers))
+        title = f"[{rendered_title}]({pr['url']})" if pr else f"{rendered_title} (Pending)"
         here = " **(this PR)**" if current == index else ""
         lines.append(f"| {index + 1} | {title} - {layer['summary']}{here} | {base} | {link} |")
     return "\n".join(lines) + "\n"
@@ -515,6 +528,7 @@ def create_pull_request(
     layer: dict[str, Any],
     base: str,
     body_file: str,
+    title: str,
 ) -> dict[str, Any]:
     arguments = [
         "pr",
@@ -524,7 +538,7 @@ def create_pull_request(
         "--head",
         layer["remote_branch"],
         "--title",
-        layer["title"],
+        title,
         "--body-file",
         body_file,
     ]
@@ -696,9 +710,10 @@ def submit(
     destination = rendered_dir or manifest_path.parent / "rendered"
     destination.mkdir(parents=True, exist_ok=True)
     for index, layer in enumerate(layers):
+        title = stacked_title(layer, index, len(layers))
         title_path = destination / f"{index + 1:02d}-title.txt"
         body_path = destination / f"{index + 1:02d}-body.md"
-        title_path.write_text(layer["title"] + "\n", encoding="utf-8")
+        title_path.write_text(title + "\n", encoding="utf-8")
         body_path.write_text(
             render_body(layers, links, index, manifest["default_base"], manifest["feature_summary"]),
             encoding="utf-8",
@@ -709,7 +724,8 @@ def submit(
                 "remote_branch": layer["remote_branch"],
                 "tip": layer["_tip"],
                 "base": manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"],
-                "title": layer["title"],
+                "title": title,
+                "source_title": layer["title"],
                 "rendered_title": str(title_path),
                 "rendered_body": str(body_path),
             }
@@ -750,6 +766,7 @@ def submit(
     for index, layer in enumerate(layers):
         base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
         existing = layer.get("_existing_pr")
+        title = stacked_title(layer, index, len(layers))
         action = "updating" if existing else "creating"
         progress(
             "submit",
@@ -773,7 +790,7 @@ def submit(
                     "edit",
                     existing["url"],
                     "--title",
-                    layer["title"],
+                    title,
                     "--body-file",
                     handle.name,
                     "--base",
@@ -781,7 +798,7 @@ def submit(
                 )
                 pr = existing
             else:
-                pr = create_pull_request(repo, manifest, layer, base, handle.name)
+                pr = create_pull_request(repo, manifest, layer, base, handle.name, title)
         links[index] = {"number": pr["number"], "url": pr["url"]}
         progress("submit", f"recorded PR #{pr['number']}: {pr['url']}")
         journal["layers"][index]["pr"] = links[index]
