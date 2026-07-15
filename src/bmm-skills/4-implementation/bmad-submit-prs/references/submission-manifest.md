@@ -32,6 +32,9 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 ```
 
 - `repository` is `[HOST/]OWNER/REPO` in `gh` syntax.
+- `repository`, `publish_remote`, and `default_base` record the user's confirmed target. Recommend
+  `upstream` when that remote exists locally and `origin` otherwise; never bake the recommendation
+  into the script as an implicit choice.
 - `publish_remote` must resolve to that same repository. This requirement is what permits each PR to
   use the prior layer as its GitHub base and show only its focused diff.
 - `branch` is an existing local PR-ready branch; `tip` is its immutable full SHA.

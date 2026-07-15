@@ -37,13 +37,20 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
 
 <step n="1" goal="Establish a representable legacy GitHub stack">
   <action>Require a clean worktree, a green PR-ready integration result, immutable target SHAs, the
-  upstream repository/default branch, and the ordered PR-ready layers with the planning layer first.</action>
+  ordered PR-ready layers with the planning layer first, and a fresh fetch of every candidate remote.</action>
+  <action>Enumerate local Git remotes and resolve each repository and default branch. Ask the user
+  which remote should receive the PRs, recommending `upstream` when it exists and `origin` otherwise.
+  Then ask which branch on that remote should be the first PR's base, recommending that remote's
+  default branch. Do not infer acceptance from an earlier run or create a manifest before both
+  choices are confirmed.</action>
+  <action>Show the selected remote, repository, base branch, and exact base SHA. If another canonical
+  remote exists, show whether its corresponding base has the same SHA; divergence requires explicit
+  user confirmation before proceeding.</action>
   <critical>Legacy GitHub can show focused chained diffs only when every PR base branch exists in the
-  upstream repository. A multi-PR fork stack cannot use a branch in the fork as a base branch in the
-  upstream repository. Therefore preflight one of these conditions before any side effect:
-  (a) PR-ready branches already exist upstream, or (b) the user explicitly authorizes publishing
-  identical-SHA temporary head branches to upstream and has push permission. Otherwise HALT before
-  creating even the planning PR. Never silently fall back to cumulative PRs against main.</critical>
+  selected repository. A multi-PR fork stack cannot use a branch in one repository as a base in
+  another. Therefore publish every PR-ready head to the selected repository, with explicit user
+  authorization and push permission, before creating PRs. Never silently fall back to cumulative
+  PRs against the selected base.</critical>
   <action>Create a run directory beneath the Git directory:
   `bmad-submit-prs/&lt;UTC timestamp&gt;/`. Persist the manifest, rendered bodies, preflight report,
   and submission journal there.</action>
@@ -71,7 +78,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   `uv run {skill-root}/scripts/submit_pr_stack.py &lt;manifest&gt; --dry-run --output &lt;journal&gt;`.
   Review each title, base/head pair, source SHA, body, stack table, and Mermaid dependency graph.</action>
   <check if="authentication, push permission, target SHA, ancestry, upstream remote identity, or an existing PR conflicts">
-    HALT before branch publication or PR creation. Report the exact repair required.
+    Report the exact failed invariant before branch publication or PR creation. Ask the user to retry
+    the same target, choose another remote and base branch, or stop safely. A new target returns to
+    Step 1 and produces a new manifest and run directory.
   </check>
 </step>
 
@@ -85,6 +94,12 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>During sequential creation, prior PR nodes are clickable and future nodes are marked pending.
   After all PRs exist, update every body and one marker comment per PR with the complete linked graph
   and ordered table. Do not create duplicate navigation comments on retry.</action>
+  <check if="branch publication or PR submission fails after side effects begin">
+    Persist the journal and show every branch and PR already created. Ask the user to retry the same
+    target, choose another remote and base branch, or stop safely. Never close, delete, or rewrite
+    partial results without separate approval. When another target is chosen, return to Step 1 with a
+    new run directory and leave the prior target unchanged.
+  </check>
 </step>
 
 <step n="5" goal="Prove the reviewer experience and hand off safely">
