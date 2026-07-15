@@ -134,6 +134,7 @@ def render_navigation(
     layers: list[dict[str, Any]],
     links: dict[int, dict[str, Any]],
     current: int | None,
+    default_base: str,
 ) -> str:
     lines = [MARKER, "## Stack navigation", ""]
     if current is not None:
@@ -147,7 +148,7 @@ def render_navigation(
             lines.append(f'  click L{index + 1} "{links[index]["url"]}" "Open PR"')
     lines.extend(["```", "", "| # | Layer | Base | PR |", "|---:|---|---|---|"])
     for index, layer in enumerate(layers):
-        base = "upstream default" if index == 0 else f"`{layers[index - 1]['remote_branch']}`"
+        base = f"`{default_base}`" if index == 0 else f"`{layers[index - 1]['remote_branch']}`"
         pr = links.get(index)
         link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
         here = " **(this PR)**" if current == index else ""
@@ -159,13 +160,14 @@ def render_body(
     layers: list[dict[str, Any]],
     links: dict[int, dict[str, Any]],
     index: int,
+    default_base: str,
 ) -> str:
     content = layers[index]["_body_file"].read_text(encoding="utf-8").rstrip()
     planning = links.get(0)
     pointer = ""
     if index and planning:
         pointer = f"\n\n**Feature overview:** [Planning PR #{planning['number']}]({planning['url']})"
-    return content + pointer + "\n\n" + render_navigation(layers, links, index)
+    return content + pointer + "\n\n" + render_navigation(layers, links, index, default_base)
 
 
 def write_journal(path: Path | None, payload: dict[str, Any]) -> None:
@@ -306,7 +308,7 @@ def submit(
     destination.mkdir(parents=True, exist_ok=True)
     for index, layer in enumerate(layers):
         body_path = destination / f"{index + 1:02d}-{layer['remote_branch'].replace('/', '-')}.md"
-        body_path.write_text(render_body(layers, links, index), encoding="utf-8")
+        body_path.write_text(render_body(layers, links, index, manifest["default_base"]), encoding="utf-8")
         journal["layers"].append(
             {
                 "branch": layer["branch"],
@@ -328,7 +330,7 @@ def submit(
     for index, layer in enumerate(layers):
         base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
         existing = layer.get("_existing_pr")
-        body = render_body(layers, links, index)
+        body = render_body(layers, links, index, manifest["default_base"])
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
             handle.flush()
@@ -370,7 +372,7 @@ def submit(
         journal["status"] = "submitting"
         write_journal(output, journal)
     for index, layer in enumerate(layers):
-        body = render_body(layers, links, index)
+        body = render_body(layers, links, index, manifest["default_base"])
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
             handle.flush()
@@ -383,7 +385,8 @@ def submit(
                 "--body-file",
                 handle.name,
             )
-        upsert_navigation_comment(repo, manifest, links[index], render_navigation(layers, links, index))
+        navigation = render_navigation(layers, links, index, manifest["default_base"])
+        upsert_navigation_comment(repo, manifest, links[index], navigation)
         expected_base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
         verify_pull_request(repo, manifest, layer, expected_base, links[index])
     journal["status"] = "complete"

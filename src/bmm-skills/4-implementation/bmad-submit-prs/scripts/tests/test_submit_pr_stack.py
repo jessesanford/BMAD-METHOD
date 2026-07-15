@@ -36,10 +36,12 @@ class SubmitterTests(unittest.TestCase):
             self.layers,
             {0: {"number": 41, "url": "https://example.test/pull/41"}},
             0,
+            "main",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn("Pending", rendered)
         self.assertIn("L1 --> L2", rendered)
+        self.assertIn("| `main` |", rendered)
 
     def test_complete_navigation_links_every_pr(self) -> None:
         rendered = MODULE.render_navigation(
@@ -49,11 +51,13 @@ class SubmitterTests(unittest.TestCase):
                 1: {"number": 42, "url": "https://example.test/pull/42"},
             },
             1,
+            "release",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn("[#42](https://example.test/pull/42)", rendered)
         self.assertNotIn("| Pending |", rendered)
         self.assertIn("**This PR:** 2 of 2", rendered)
+        self.assertIn("| `release` |", rendered)
 
     def test_remote_url_parsing_supports_ssh_and_https(self) -> None:
         self.assertEqual(
