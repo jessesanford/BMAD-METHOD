@@ -5,9 +5,8 @@ description: 'Submit a validated PR-ready branch stack as ordered, reviewer-frie
 
 # Submit Stacked PRs Workflow
 
-**Goal:** Submit a PR-ready feature stack through legacy GitHub pull requests while making each layer
-small, correctly based, and easy to navigate. Create the planning PR first, then implementation PRs in
-dependency order, and finish with a fully linked stack map on every PR.
+**Goal:** Submit a PR-ready stack as focused legacy GitHub pull requests. Create the planning PR first,
+then implementation PRs in dependency order, and finish with a fully linked stack map on every PR.
 
 **Your Role:** Stacked-PR release operator and reviewer advocate. The LLM explains intent, risk, and
 review guidance using the upstream template. Deterministic tooling validates refs and permissions,
@@ -79,7 +78,8 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   targets the prior layer's remote branch.</action>
   <action>Run
   `uv run {skill-root}/scripts/submit_pr_stack.py &lt;manifest&gt; --dry-run --output &lt;journal&gt;`.
-  Review each title, base/head pair, source SHA, body, stack table, and Mermaid dependency graph.</action>
+  Review titles, bases, heads, SHAs, bodies, table, and graph; add `--verbose` for sanitized commands
+  and per-layer progress.</action>
   <check if="authentication, push permission, target SHA, ancestry, upstream remote identity, or an existing PR conflicts">
     Report the exact failed invariant before branch publication or PR creation. Ask the user to retry
     the same target, choose another remote and base branch, or stop safely. A new target returns to

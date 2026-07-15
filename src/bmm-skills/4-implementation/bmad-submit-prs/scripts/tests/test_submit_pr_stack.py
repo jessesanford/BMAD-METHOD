@@ -64,6 +64,20 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("**This PR:** 2 of 2", rendered)
         self.assertIn("| `release` |", rendered)
 
+    def test_enterprise_environment_ignores_github_token(self) -> None:
+        original = MODULE.COMMAND_ENV
+        self.addCleanup(setattr, MODULE, "COMMAND_ENV", original)
+        with mock.patch.dict(MODULE.os.environ, {"GH_TOKEN": "github-token"}):
+            MODULE.configure_command_environment("github.example.com/owner/repo")
+        self.assertNotIn("GH_TOKEN", MODULE.COMMAND_ENV)
+
+    def test_command_display_redacts_inline_bodies(self) -> None:
+        rendered = MODULE.display_command(
+            ["gh", "api", "-f", "body=secret", "pr", "comment", "--body", "also-secret"]
+        )
+        self.assertNotIn("secret", rendered)
+        self.assertIn("body=<redacted>", rendered)
+
     def test_implementation_body_links_feature_plan_with_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             body_file = Path(temporary) / "body.md"
@@ -162,6 +176,34 @@ class SubmitterTests(unittest.TestCase):
                 {"remote_branch": "stack/story-pr-ready", "_tip": "new-tip"},
             )
 
+        retry_delay_mock.assert_not_called()
+
+    @mock.patch.object(MODULE, "retry_delay")
+    @mock.patch.object(MODULE, "reconcile_created_pull_request")
+    @mock.patch.object(MODULE, "gh")
+    def test_create_reconciles_ambiguous_transport_failure(
+        self,
+        gh_mock: mock.Mock,
+        reconcile_mock: mock.Mock,
+        retry_delay_mock: mock.Mock,
+    ) -> None:
+        gh_mock.side_effect = MODULE.SubmitError('Post "https://api.example/graphql": EOF')
+        reconcile_mock.return_value = {
+            "number": 41,
+            "url": "https://example.test/pull/41",
+            "state": "OPEN",
+        }
+
+        pr = MODULE.create_pull_request(
+            Path.cwd(),
+            {"repository": "example.test/owner/repo", "draft": False},
+            {"remote_branch": "stack/story-pr-ready", "title": "feat: story"},
+            "stack/plan-pr-ready",
+            "/tmp/body.md",
+        )
+
+        self.assertEqual(pr["number"], 41)
+        reconcile_mock.assert_called_once()
         retry_delay_mock.assert_not_called()
 
     def test_manual_instructions_include_order_files_and_graph(self) -> None:
