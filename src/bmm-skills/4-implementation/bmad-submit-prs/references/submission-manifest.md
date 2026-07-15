@@ -8,6 +8,7 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   "repository": "github.example.com/upstream/project",
   "publish_remote": "upstream",
   "default_base": "main",
+  "stack_label": "feature-x",
   "feature_summary": "Adds opt-in tracing across the migration-agent fleet.",
   "draft": false,
   "template_source": ".github/PULL_REQUEST_TEMPLATE.md",
@@ -38,11 +39,13 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   into the script as an implicit choice.
 - `feature_summary` is a concise feature-level blurb repeated on implementation PRs beside the
   planning-PR link.
+- `stack_label` is 1-4 succinct, feature-derived lowercase keywords such as `arize-ax`. It need not
+  prove repository-wide uniqueness.
 - `publish_remote` must resolve to that same repository. This requirement is what permits each PR to
   use the prior layer as its GitHub base and show only its focused diff.
 - `branch` is an existing local PR-ready branch; `tip` is its immutable full SHA.
-- `title` uses a conventional prefix. The script inserts `(stacked-pr [N/X])` immediately before its
-  colon in rendered files, navigation, and submitted PR titles.
+- `title` uses a conventional prefix. The script inserts `(stacked-pr: <stack_label> [N/X])`
+  immediately before its colon in rendered files, navigation, and submitted PR titles.
 - `remote_branch` is the branch published in the upstream repository. Prefer an isolated contributor
   namespace and avoid protected or existing feature branches.
 - The first PR base is `default_base`; each later PR base is the prior `remote_branch`.

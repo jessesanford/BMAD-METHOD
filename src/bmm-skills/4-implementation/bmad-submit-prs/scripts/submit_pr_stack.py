@@ -179,11 +179,19 @@ def parse_remote(value: str) -> tuple[str | None, str, str]:
     return parsed.hostname, parts[0], parts[1]
 
 
-def stacked_title(layer: dict[str, Any], index: int, count: int) -> str:
+def stacked_title(
+    layer: dict[str, Any],
+    index: int,
+    count: int,
+    stack_label: str,
+) -> str:
     prefix, separator, subject = layer["title"].partition(":")
     if not separator or not prefix.strip() or not subject.strip():
         raise SubmitError(f"layer title must use a conventional prefix: {layer['title']}")
-    return f"{prefix.strip()}(stacked-pr [{index + 1}/{count}]): {subject.strip()}"
+    return (
+        f"{prefix.strip()}(stacked-pr: {stack_label} [{index + 1}/{count}]): "
+        f"{subject.strip()}"
+    )
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -224,9 +232,14 @@ def load_manual_links(path: Path | None, layer_count: int) -> dict[int, dict[str
 def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     if git(repo, "status", "--porcelain"):
         raise SubmitError("worktree must be clean")
-    for field in ("repository", "publish_remote", "default_base", "feature_summary"):
+    for field in ("repository", "publish_remote", "default_base", "feature_summary", "stack_label"):
         if not manifest.get(field):
             raise SubmitError(f"manifest missing {field}")
+    if (
+        len(manifest["stack_label"]) > 24
+        or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+){0,3}", manifest["stack_label"])
+    ):
+        raise SubmitError("stack_label must be 1-4 lowercase keywords, at most 24 characters")
     expected_host, expected_owner, expected_name = split_repository(manifest["repository"])
     remote_url = git(repo, "remote", "get-url", manifest["publish_remote"])
     host, owner, name = parse_remote(remote_url)
@@ -271,10 +284,11 @@ def node_label(
     layer: dict[str, Any],
     links: dict[int, dict[str, Any]],
     count: int,
+    stack_label: str,
 ) -> str:
     pr = links.get(index)
     prefix = f"#{pr['number']} " if pr else "Pending: "
-    return (prefix + stacked_title(layer, index, count)).replace('"', "'")
+    return (prefix + stacked_title(layer, index, count, stack_label)).replace('"', "'")
 
 
 def render_navigation(
@@ -282,6 +296,7 @@ def render_navigation(
     links: dict[int, dict[str, Any]],
     current: int | None,
     default_base: str,
+    stack_label: str,
 ) -> str:
     lines = [MARKER, "## Stack navigation", ""]
     if current is not None:
@@ -295,7 +310,9 @@ def render_navigation(
     )
     lines.extend(["```mermaid", "flowchart TD"])
     for index, layer in enumerate(layers):
-        lines.append(f'  L{index + 1}["{node_label(index, layer, links, len(layers))}"]')
+        lines.append(
+            f'  L{index + 1}["{node_label(index, layer, links, len(layers), stack_label)}"]'
+        )
         if index:
             lines.append(f"  L{index} --> L{index + 1}")
         if index in links:
@@ -305,7 +322,7 @@ def render_navigation(
         base = f"`{default_base}`" if index == 0 else f"`{layers[index - 1]['remote_branch']}`"
         pr = links.get(index)
         link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
-        rendered_title = stacked_title(layer, index, len(layers))
+        rendered_title = stacked_title(layer, index, len(layers), stack_label)
         title = f"[{rendered_title}]({pr['url']})" if pr else f"{rendered_title} (Pending)"
         here = " **(this PR)**" if current == index else ""
         lines.append(f"| {index + 1} | {title} - {layer['summary']}{here} | {base} | {link} |")
@@ -318,6 +335,7 @@ def render_body(
     index: int,
     default_base: str,
     feature_summary: str,
+    stack_label: str,
 ) -> str:
     content = layers[index]["_body_file"].read_text(encoding="utf-8").rstrip()
     planning = links.get(0)
@@ -327,7 +345,12 @@ def render_body(
             f"\n\n**Feature context:** {feature_summary} "
             f"See [Planning PR #{planning['number']}]({planning['url']}) for the complete design and rollout."
         )
-    return content + pointer + "\n\n" + render_navigation(layers, links, index, default_base)
+    return (
+        content
+        + pointer
+        + "\n\n"
+        + render_navigation(layers, links, index, default_base, stack_label)
+    )
 
 
 def write_journal(path: Path | None, payload: dict[str, Any]) -> None:
@@ -434,7 +457,13 @@ def render_manual_instructions(
             + (f' --output "{output}"' if output else ""),
             "```",
             "",
-            render_navigation(layers, links, None, manifest["default_base"]).rstrip(),
+            render_navigation(
+                layers,
+                links,
+                None,
+                manifest["default_base"],
+                manifest["stack_label"],
+            ).rstrip(),
             "",
         ]
     )
@@ -704,18 +733,26 @@ def submit(
         "status": "preflight",
         "repository": manifest["repository"],
         "default_base": manifest["default_base"],
+        "stack_label": manifest["stack_label"],
         "template_source": manifest.get("template_source"),
         "layers": [],
     }
     destination = rendered_dir or manifest_path.parent / "rendered"
     destination.mkdir(parents=True, exist_ok=True)
     for index, layer in enumerate(layers):
-        title = stacked_title(layer, index, len(layers))
+        title = stacked_title(layer, index, len(layers), manifest["stack_label"])
         title_path = destination / f"{index + 1:02d}-title.txt"
         body_path = destination / f"{index + 1:02d}-body.md"
         title_path.write_text(title + "\n", encoding="utf-8")
         body_path.write_text(
-            render_body(layers, links, index, manifest["default_base"], manifest["feature_summary"]),
+            render_body(
+                layers,
+                links,
+                index,
+                manifest["default_base"],
+                manifest["feature_summary"],
+                manifest["stack_label"],
+            ),
             encoding="utf-8",
         )
         journal["layers"].append(
@@ -766,7 +803,7 @@ def submit(
     for index, layer in enumerate(layers):
         base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
         existing = layer.get("_existing_pr")
-        title = stacked_title(layer, index, len(layers))
+        title = stacked_title(layer, index, len(layers), manifest["stack_label"])
         action = "updating" if existing else "creating"
         progress(
             "submit",
@@ -778,6 +815,7 @@ def submit(
             index,
             manifest["default_base"],
             manifest["feature_summary"],
+            manifest["stack_label"],
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
@@ -815,6 +853,7 @@ def submit(
             index,
             manifest["default_base"],
             manifest["feature_summary"],
+            manifest["stack_label"],
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
@@ -828,7 +867,13 @@ def submit(
                 "--body-file",
                 handle.name,
             )
-        navigation = render_navigation(layers, links, index, manifest["default_base"])
+        navigation = render_navigation(
+            layers,
+            links,
+            index,
+            manifest["default_base"],
+            manifest["stack_label"],
+        )
         upsert_navigation_comment(repo, manifest, links[index], navigation)
         expected_base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
         verify_pull_request(repo, manifest, layer, expected_base, links[index])

@@ -40,10 +40,11 @@ class SubmitterTests(unittest.TestCase):
             {0: {"number": 41, "url": "https://example.test/pull/41"}},
             0,
             "main",
+            "feature-x",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn(
-            "[docs(stacked-pr [1/2]): plan feature](https://example.test/pull/41)",
+            "[docs(stacked-pr: feature-x [1/2]): plan feature](https://example.test/pull/41)",
             rendered,
         )
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
@@ -60,6 +61,7 @@ class SubmitterTests(unittest.TestCase):
             },
             1,
             "release",
+            "feature-x",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn("[#42](https://example.test/pull/42)", rendered)
@@ -92,6 +94,7 @@ class SubmitterTests(unittest.TestCase):
                 1,
                 "main",
                 "Adds opt-in tracing across the migration-agent fleet.",
+                "feature-x",
             )
         self.assertIn("Adds opt-in tracing across the migration-agent fleet.", rendered)
         self.assertIn("[Planning PR #41](https://example.test/pull/41)", rendered)
@@ -103,8 +106,9 @@ class SubmitterTests(unittest.TestCase):
                 {"title": "feat(observability): add tracing"},
                 0,
                 16,
+                "arize-ax",
             ),
-            "feat(observability)(stacked-pr [1/16]): add tracing",
+            "feat(observability)(stacked-pr: arize-ax [1/16]): add tracing",
         )
 
     def test_remote_url_parsing_supports_ssh_and_https(self) -> None:
@@ -213,7 +217,7 @@ class SubmitterTests(unittest.TestCase):
             {"remote_branch": "stack/story-pr-ready", "title": "feat: story"},
             "stack/plan-pr-ready",
             "/tmp/body.md",
-            "feat(stacked-pr [2/2]): story",
+            "feat(stacked-pr: feature-x [2/2]): story",
         )
 
         self.assertEqual(pr["number"], 41)
@@ -228,6 +232,7 @@ class SubmitterTests(unittest.TestCase):
                     "repository": "github.example.com/owner/repo",
                     "default_base": "main",
                     "feature_summary": "Adds focused behavior.",
+                    "stack_label": "feature-x",
                 },
                 self.layers,
                 {0: {"number": 41, "url": "https://github.example.com/owner/repo/pull/41"}},
