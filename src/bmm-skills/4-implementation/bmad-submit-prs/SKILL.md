@@ -67,10 +67,10 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   and record the choice.</action>
   <action>If none exists, use these sections: Summary; Motivation and context; Changes; Testing;
   Risk, rollout, and compatibility; Reviewer guidance; Checklist.</action>
-  <action>Write one body file per layer. The planning PR explains the complete feature, why it is split,
-  every implementation layer, merge order, validation strategy, and reviewer path. Each implementation
-  PR links back to the planning PR, states its place in the feature, scopes its own changes, names its
-  prerequisite, gives focused validation and risk notes, and avoids repeating the full design.</action>
+  <action>Write a feature summary and one body file per layer. The planning PR explains the feature,
+  split, layers, merge order, validation, and reviewer path. Each implementation PR links to the plan,
+  states its place, scopes its changes, names its prerequisite, and gives focused validation and risk
+  notes without repeating the design.</action>
 </step>
 
 <step n="3" goal="Create a fail-closed submission manifest">
@@ -104,9 +104,10 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>Reuse an open PR only when its head and base exactly match the manifest. Refuse closed,
   merged, duplicate, or mismatched PR state. Persist the journal after every successful operation so a
   retry can resume idempotently.</action>
-  <action>During sequential creation, prior PR nodes are clickable and future nodes are marked pending.
-  After all PRs exist, update every body and one marker comment per PR with the complete linked graph
-  and ordered table. Do not create duplicate navigation comments on retry.</action>
+  <action>During sequential creation, prior PR titles and graph nodes are clickable and future nodes
+  are marked pending. Explain stacked PRs with a link to `https://www.stacking.dev/`. After all PRs
+  exist, update every body and one marker comment per PR with the complete linked graph and ordered
+  table. Do not create duplicate navigation comments on retry.</action>
   <check if="branch publication or PR submission fails after side effects begin">
     Persist the journal and show every branch and PR already created. Ask the user to retry the same
     target, choose another remote and base branch, or stop safely. Never close, delete, or rewrite

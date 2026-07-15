@@ -107,7 +107,7 @@ def load_manual_links(path: Path | None, layer_count: int) -> dict[int, dict[str
 def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     if git(repo, "status", "--porcelain"):
         raise SubmitError("worktree must be clean")
-    for field in ("repository", "publish_remote", "default_base"):
+    for field in ("repository", "publish_remote", "default_base", "feature_summary"):
         if not manifest.get(field):
             raise SubmitError(f"manifest missing {field}")
     expected_host, expected_owner, expected_name = split_repository(manifest["repository"])
@@ -164,6 +164,13 @@ def render_navigation(
     lines = [MARKER, "## Stack navigation", ""]
     if current is not None:
         lines.extend([f"**This PR:** {current + 1} of {len(layers)}", ""])
+    lines.extend(
+        [
+            "This PR is part of a [stacked pull request](https://www.stacking.dev/), split into",
+            "small, dependency-ordered changes for focused review.",
+            "",
+        ]
+    )
     lines.extend(["```mermaid", "flowchart TD"])
     for index, layer in enumerate(layers):
         lines.append(f'  L{index + 1}["{node_label(index, layer, links)}"]')
@@ -176,8 +183,9 @@ def render_navigation(
         base = f"`{default_base}`" if index == 0 else f"`{layers[index - 1]['remote_branch']}`"
         pr = links.get(index)
         link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
+        title = f"[{layer['title']}]({pr['url']})" if pr else f"{layer['title']} (Pending)"
         here = " **(this PR)**" if current == index else ""
-        lines.append(f"| {index + 1} | {layer['summary']}{here} | {base} | {link} |")
+        lines.append(f"| {index + 1} | {title} - {layer['summary']}{here} | {base} | {link} |")
     return "\n".join(lines) + "\n"
 
 
@@ -186,12 +194,16 @@ def render_body(
     links: dict[int, dict[str, Any]],
     index: int,
     default_base: str,
+    feature_summary: str,
 ) -> str:
     content = layers[index]["_body_file"].read_text(encoding="utf-8").rstrip()
     planning = links.get(0)
     pointer = ""
     if index and planning:
-        pointer = f"\n\n**Feature overview:** [Planning PR #{planning['number']}]({planning['url']})"
+        pointer = (
+            f"\n\n**Feature context:** {feature_summary} "
+            f"See [Planning PR #{planning['number']}]({planning['url']}) for the complete design and rollout."
+        )
     return content + pointer + "\n\n" + render_navigation(layers, links, index, default_base)
 
 
@@ -437,7 +449,10 @@ def submit(
         title_path = destination / f"{index + 1:02d}-title.txt"
         body_path = destination / f"{index + 1:02d}-body.md"
         title_path.write_text(layer["title"] + "\n", encoding="utf-8")
-        body_path.write_text(render_body(layers, links, index, manifest["default_base"]), encoding="utf-8")
+        body_path.write_text(
+            render_body(layers, links, index, manifest["default_base"], manifest["feature_summary"]),
+            encoding="utf-8",
+        )
         journal["layers"].append(
             {
                 "branch": layer["branch"],
@@ -484,7 +499,13 @@ def submit(
     for index, layer in enumerate(layers):
         base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
         existing = layer.get("_existing_pr")
-        body = render_body(layers, links, index, manifest["default_base"])
+        body = render_body(
+            layers,
+            links,
+            index,
+            manifest["default_base"],
+            manifest["feature_summary"],
+        )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
             handle.flush()
@@ -526,7 +547,13 @@ def submit(
         journal["status"] = "submitting"
         write_journal(output, journal)
     for index, layer in enumerate(layers):
-        body = render_body(layers, links, index, manifest["default_base"])
+        body = render_body(
+            layers,
+            links,
+            index,
+            manifest["default_base"],
+            manifest["feature_summary"],
+        )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
             handle.flush()

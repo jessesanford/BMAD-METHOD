@@ -41,6 +41,8 @@ class SubmitterTests(unittest.TestCase):
             "main",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
+        self.assertIn("[docs: plan feature](https://example.test/pull/41)", rendered)
+        self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
         self.assertIn("Pending", rendered)
         self.assertIn("L1 --> L2", rendered)
         self.assertIn("| `main` |", rendered)
@@ -61,6 +63,22 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("**This PR:** 2 of 2", rendered)
         self.assertIn("| `release` |", rendered)
 
+    def test_implementation_body_links_feature_plan_with_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [dict(layer, _body_file=body_file) for layer in self.layers]
+            rendered = MODULE.render_body(
+                layers,
+                {0: {"number": 41, "url": "https://example.test/pull/41"}},
+                1,
+                "main",
+                "Adds opt-in tracing across the migration-agent fleet.",
+            )
+        self.assertIn("Adds opt-in tracing across the migration-agent fleet.", rendered)
+        self.assertIn("[Planning PR #41](https://example.test/pull/41)", rendered)
+        self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
+
     def test_remote_url_parsing_supports_ssh_and_https(self) -> None:
         self.assertEqual(
             MODULE.parse_remote("git@github.example.com:owner/repo.git"),
@@ -74,6 +92,7 @@ class SubmitterTests(unittest.TestCase):
                 {
                     "repository": "github.example.com/owner/repo",
                     "default_base": "main",
+                    "feature_summary": "Adds focused behavior.",
                 },
                 self.layers,
                 {0: {"number": 41, "url": "https://github.example.com/owner/repo/pull/41"}},
