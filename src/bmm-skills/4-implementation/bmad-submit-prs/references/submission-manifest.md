@@ -12,6 +12,38 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   "feature_summary": "Adds opt-in tracing across the migration-agent fleet.",
   "draft": false,
   "template_source": ".github/PULL_REQUEST_TEMPLATE.md",
+  "integration_evidence": {
+    "branch": "integration/feature-x-validated",
+    "commit": "FULL_INTEGRATION_COMMIT_SHA",
+    "report_path": "docs/validation/feature-x-stack.md",
+    "test_command": "uv run pytest packages/feature-common/tests cli/tests --tb=short",
+    "tests": {
+      "passed": 256,
+      "skipped": 5,
+      "warnings": 2
+    },
+    "builds": [
+      {
+        "artifact": "feature_common-1.0.0-py3-none-any.whl",
+        "status": "passed",
+        "sha256": "FULL_64_CHARACTER_SHA256"
+      },
+      {
+        "artifact": "feature_cli-1.0.0-py3-none-any.whl",
+        "status": "passed",
+        "sha256": "FULL_64_CHARACTER_SHA256"
+      }
+    ],
+    "partial_merge_safety": {
+      "validated_prefixes": 2,
+      "total_prefixes": 2,
+      "feature_flag": {
+        "name": "FEATURE_X_ENABLED",
+        "safe_default": "disabled",
+        "disabled_behavior": "the disabled path does not import or initialize feature runtime code"
+      }
+    }
+  },
   "layers": [
     {
       "branch": "feature/plan-pr-ready",
@@ -41,6 +73,15 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   planning-PR link.
 - `stack_label` is 1-4 succinct, feature-derived lowercase keywords such as `arize-ax`. It need not
   prove repository-wide uniqueness.
+- `integration_evidence` is mandatory and fail-closed:
+  - `branch` must exist locally and on `publish_remote` at the exact full `commit`.
+  - `commit` must descend from the final stack layer and contain `report_path`.
+  - `tests` records the exact command and its pass, skip, and warning counts.
+  - Every `builds` entry must have `status: "passed"` and the SHA-256 digest of the built artifact.
+  - `partial_merge_safety` must report every submitted prefix as validated. Its feature flag must
+    default to disabled and state what the disabled runtime path avoids.
+  - The script derives a live integration-branch link and an immutable report permalink. It refuses
+    to render test, build, or partial-merge claims when any invariant is missing or inconsistent.
 - `publish_remote` must resolve to that same repository. This requirement is what permits each PR to
   use the prior layer as its GitHub base and show only its focused diff.
 - `branch` is an existing local PR-ready branch; `tip` is its immutable full SHA.
@@ -51,7 +92,8 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 - The first PR base is `default_base`; each later PR base is the prior `remote_branch`.
 - `body_file` resolves relative to the manifest. It contains the upstream template plus layer-specific
   content. The script appends deterministic navigation, links submitted PR titles in the full stack,
-  and identifies the series as a stacked PR with a link to `https://www.stacking.dev/`.
+  identifies the series as a stacked PR with a link to `https://www.stacking.dev/`, and adds the
+  evidence-backed integration and partial-merge safety section to every PR.
 - Set `draft` when the complete stack should initially avoid normal ready-for-review signaling.
 
 ## Manual submission package

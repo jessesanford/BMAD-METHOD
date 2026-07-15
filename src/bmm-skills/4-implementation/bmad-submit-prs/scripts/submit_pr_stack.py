@@ -229,6 +229,102 @@ def load_manual_links(path: Path | None, layer_count: int) -> dict[int, dict[str
     return links
 
 
+def require_count(value: Any, field: str, *, positive: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < int(positive):
+        qualifier = "positive" if positive else "non-negative"
+        raise SubmitError(f"integration_evidence {field} must be a {qualifier} integer")
+    return value
+
+
+def validate_integration_evidence(
+    repo: Path,
+    manifest: dict[str, Any],
+    layers: list[dict[str, Any]],
+) -> None:
+    evidence = manifest.get("integration_evidence")
+    if not isinstance(evidence, dict):
+        raise SubmitError("manifest missing integration_evidence")
+    for field in ("branch", "commit", "report_path", "test_command"):
+        if not isinstance(evidence.get(field), str) or not evidence[field].strip():
+            raise SubmitError(f"integration_evidence missing {field}")
+
+    report_path = Path(evidence["report_path"])
+    if report_path.is_absolute() or ".." in report_path.parts:
+        raise SubmitError("integration_evidence report_path must be repository-relative")
+
+    commit = resolve(repo, evidence["commit"])
+    if resolve(repo, evidence["branch"]) != commit:
+        raise SubmitError("integration evidence branch drifted from its recorded commit")
+    if not is_ancestor(repo, layers[-1]["_tip"], commit):
+        raise SubmitError("integration evidence commit does not descend from the final stack layer")
+    report = git(repo, "show", f"{commit}:{evidence['report_path']}")
+    if remote_sha(repo, manifest["publish_remote"], evidence["branch"]) != commit:
+        raise SubmitError("integration evidence branch is not published at its recorded commit")
+
+    tests = evidence.get("tests")
+    if not isinstance(tests, dict):
+        raise SubmitError("integration_evidence missing tests")
+    require_count(tests.get("passed"), "tests.passed", positive=True)
+    require_count(tests.get("skipped"), "tests.skipped")
+    require_count(tests.get("warnings"), "tests.warnings")
+
+    builds = evidence.get("builds")
+    if not isinstance(builds, list) or not builds:
+        raise SubmitError("integration_evidence builds must be a non-empty list")
+    for index, build in enumerate(builds, start=1):
+        if (
+            not isinstance(build, dict)
+            or not isinstance(build.get("artifact"), str)
+            or not build["artifact"].strip()
+        ):
+            raise SubmitError(f"integration_evidence build {index} missing artifact")
+        if build.get("status") != "passed":
+            raise SubmitError(f"integration_evidence build {index} did not pass")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(build.get("sha256", ""))):
+            raise SubmitError(f"integration_evidence build {index} requires a SHA-256 digest")
+
+    safety = evidence.get("partial_merge_safety")
+    if not isinstance(safety, dict):
+        raise SubmitError("integration_evidence missing partial_merge_safety")
+    validated = require_count(
+        safety.get("validated_prefixes"),
+        "partial_merge_safety.validated_prefixes",
+        positive=True,
+    )
+    total = require_count(
+        safety.get("total_prefixes"),
+        "partial_merge_safety.total_prefixes",
+        positive=True,
+    )
+    if validated != total or total != len(layers):
+        raise SubmitError("partial-merge safety must validate every submitted stack prefix")
+    feature_flag = safety.get("feature_flag")
+    if not isinstance(feature_flag, dict):
+        raise SubmitError("partial_merge_safety missing feature_flag")
+    for field in ("name", "safe_default", "disabled_behavior"):
+        if not isinstance(feature_flag.get(field), str) or not feature_flag[field].strip():
+            raise SubmitError(f"partial_merge_safety feature_flag missing {field}")
+    if feature_flag["safe_default"].casefold() != "disabled":
+        raise SubmitError("partial_merge_safety feature flag must default to disabled")
+
+    required_report_content = (
+        evidence["test_command"],
+        f"{tests['passed']} passed, {tests['skipped']} skipped, {tests['warnings']} warnings",
+        f"{validated}/{total}",
+        feature_flag["name"],
+        *(value for build in builds for value in (build["artifact"], build["sha256"])),
+    )
+    if any(value not in report for value in required_report_content):
+        raise SubmitError("committed integration report does not substantiate the manifest evidence")
+
+    web_url = repository_web_url(manifest["repository"])
+    evidence["_commit"] = commit
+    evidence["_branch_url"] = f"{web_url}/tree/{quote(evidence['branch'], safe='/')}"
+    evidence["_report_url"] = (
+        f"{web_url}/blob/{commit}/{quote(evidence['report_path'], safe='/')}"
+    )
+
+
 def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     if git(repo, "status", "--porcelain"):
         raise SubmitError("worktree must be clean")
@@ -276,6 +372,7 @@ def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str,
         if not is_ancestor(repo, expected_parent, layer["_tip"]):
             raise SubmitError(f"layer {index + 1} does not descend from layer {index}")
         prior = layer["_tip"]
+    validate_integration_evidence(repo, manifest, layers)
     return layers
 
 
@@ -336,6 +433,7 @@ def render_body(
     default_base: str,
     feature_summary: str,
     stack_label: str,
+    integration_evidence: dict[str, Any],
 ) -> str:
     content = layers[index]["_body_file"].read_text(encoding="utf-8").rstrip()
     planning = links.get(0)
@@ -345,9 +443,28 @@ def render_body(
             f"\n\n**Feature context:** {feature_summary} "
             f"See [Planning PR #{planning['number']}]({planning['url']}) for the complete design and rollout."
         )
+    tests = integration_evidence["tests"]
+    safety = integration_evidence["partial_merge_safety"]
+    feature_flag = safety["feature_flag"]
+    builds = ", ".join(f"`{build['artifact']}`" for build in integration_evidence["builds"])
+    validation = (
+        "\n\n## Stack validation and partial-merge safety\n\n"
+        f"All **{safety['validated_prefixes']}/{safety['total_prefixes']}** cumulative stack prefixes "
+        "passed their required tests and builds, so the supported dependency-ordered merge sequence "
+        "does not leave `main` in an unvalidated partial state. "
+        f"`{feature_flag['name']}` defaults to **{feature_flag['safe_default']}**; "
+        f"{feature_flag['disabled_behavior']}\n\n"
+        f"- [Validated integration branch]({integration_evidence['_branch_url']}) at "
+        f"`{integration_evidence['_commit']}`\n"
+        f"- [Committed validation report]({integration_evidence['_report_url']})\n"
+        f"- Tests: `{integration_evidence['test_command']}` - **{tests['passed']} passed, "
+        f"{tests['skipped']} skipped, {tests['warnings']} warnings**\n"
+        f"- Built distributions: {builds}"
+    )
     return (
         content
         + pointer
+        + validation
         + "\n\n"
         + render_navigation(layers, links, index, default_base, stack_label)
     )
@@ -647,7 +764,7 @@ def verify_pull_request(
             "view",
             pr["url"],
             "--json",
-            "state,isDraft,baseRefName,headRefName,headRefOid",
+            "state,isDraft,baseRefName,headRefName,headRefOid,body",
         )
     )
     expected = {
@@ -660,6 +777,17 @@ def verify_pull_request(
     mismatches = [key for key, value in expected.items() if state.get(key) != value]
     if mismatches:
         raise SubmitError(f"submitted PR state mismatch for {layer['remote_branch']}: {', '.join(mismatches)}")
+    body = state.get("body") or ""
+    evidence = manifest["integration_evidence"]
+    required_body_content = (
+        MARKER,
+        evidence["_branch_url"],
+        evidence["_report_url"],
+        evidence["test_command"],
+        evidence["partial_merge_safety"]["feature_flag"]["name"],
+    )
+    if any(value not in body for value in required_body_content):
+        raise SubmitError(f"submitted PR evidence is incomplete for {layer['remote_branch']}")
 
 
 def upsert_navigation_comment(
@@ -735,6 +863,12 @@ def submit(
         "default_base": manifest["default_base"],
         "stack_label": manifest["stack_label"],
         "template_source": manifest.get("template_source"),
+        "integration_evidence": {
+            "branch": manifest["integration_evidence"]["branch"],
+            "commit": manifest["integration_evidence"]["_commit"],
+            "branch_url": manifest["integration_evidence"]["_branch_url"],
+            "report_url": manifest["integration_evidence"]["_report_url"],
+        },
         "layers": [],
     }
     destination = rendered_dir or manifest_path.parent / "rendered"
@@ -752,6 +886,7 @@ def submit(
                 manifest["default_base"],
                 manifest["feature_summary"],
                 manifest["stack_label"],
+                manifest["integration_evidence"],
             ),
             encoding="utf-8",
         )
@@ -816,6 +951,7 @@ def submit(
             manifest["default_base"],
             manifest["feature_summary"],
             manifest["stack_label"],
+            manifest["integration_evidence"],
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
@@ -854,6 +990,7 @@ def submit(
             manifest["default_base"],
             manifest["feature_summary"],
             manifest["stack_label"],
+            manifest["integration_evidence"],
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)

@@ -33,6 +33,32 @@ class SubmitterTests(unittest.TestCase):
                 "remote_branch": "stack/story-pr-ready",
             },
         ]
+        self.evidence = {
+            "branch": "integration/feature-x",
+            "commit": "a" * 40,
+            "report_path": "docs/validation/feature-x.md",
+            "test_command": "uv run pytest",
+            "tests": {"passed": 42, "skipped": 1, "warnings": 0},
+            "builds": [
+                {
+                    "artifact": "feature_x-1.0.0-py3-none-any.whl",
+                    "status": "passed",
+                    "sha256": "b" * 64,
+                }
+            ],
+            "partial_merge_safety": {
+                "validated_prefixes": 2,
+                "total_prefixes": 2,
+                "feature_flag": {
+                    "name": "FEATURE_X_ENABLED",
+                    "safe_default": "disabled",
+                    "disabled_behavior": "the disabled path does not initialize the feature",
+                },
+            },
+            "_commit": "a" * 40,
+            "_branch_url": "https://example.test/tree/integration/feature-x",
+            "_report_url": "https://example.test/blob/commit/docs/validation/feature-x.md",
+        }
 
     def test_partial_navigation_links_prior_and_marks_future(self) -> None:
         rendered = MODULE.render_navigation(
@@ -95,10 +121,93 @@ class SubmitterTests(unittest.TestCase):
                 "main",
                 "Adds opt-in tracing across the migration-agent fleet.",
                 "feature-x",
+                self.evidence,
             )
         self.assertIn("Adds opt-in tracing across the migration-agent fleet.", rendered)
         self.assertIn("[Planning PR #41](https://example.test/pull/41)", rendered)
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
+        self.assertIn("All **2/2** cumulative stack prefixes", rendered)
+        self.assertIn("FEATURE_X_ENABLED", rendered)
+        self.assertIn("**42 passed, 1 skipped, 0 warnings**", rendered)
+        self.assertIn("feature_x-1.0.0-py3-none-any.whl", rendered)
+
+    @mock.patch.object(MODULE, "remote_sha")
+    @mock.patch.object(MODULE, "git")
+    @mock.patch.object(MODULE, "is_ancestor")
+    @mock.patch.object(MODULE, "resolve")
+    def test_integration_evidence_requires_published_descendant_with_full_prefix_coverage(
+        self,
+        resolve_mock: mock.Mock,
+        is_ancestor_mock: mock.Mock,
+        git_mock: mock.Mock,
+        remote_sha_mock: mock.Mock,
+    ) -> None:
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "publish_remote": "origin",
+            "integration_evidence": {
+                key: value for key, value in self.evidence.items() if not key.startswith("_")
+            },
+        }
+        resolve_mock.return_value = "a" * 40
+        is_ancestor_mock.return_value = True
+        remote_sha_mock.return_value = "a" * 40
+        git_mock.return_value = (
+            "uv run pytest\n42 passed, 1 skipped, 0 warnings\n2/2\n"
+            "FEATURE_X_ENABLED\nfeature_x-1.0.0-py3-none-any.whl\n"
+            f"{'b' * 64}\n"
+        )
+
+        MODULE.validate_integration_evidence(
+            Path.cwd(),
+            manifest,
+            [{"_tip": "first"}, {"_tip": "final"}],
+        )
+
+        self.assertIn("_branch_url", manifest["integration_evidence"])
+        self.assertIn("_report_url", manifest["integration_evidence"])
+        git_mock.assert_called_once_with(
+            Path.cwd(),
+            "show",
+            f"{'a' * 40}:docs/validation/feature-x.md",
+        )
+
+    @mock.patch.object(MODULE, "remote_sha", return_value="a" * 40)
+    @mock.patch.object(
+        MODULE,
+        "git",
+        return_value=(
+            "uv run pytest\n42 passed, 1 skipped, 0 warnings\n2/2\n"
+            "FEATURE_X_ENABLED\nfeature_x-1.0.0-py3-none-any.whl\n"
+            + "b" * 64
+        ),
+    )
+    @mock.patch.object(MODULE, "is_ancestor", return_value=True)
+    @mock.patch.object(MODULE, "resolve", return_value="a" * 40)
+    def test_integration_evidence_rejects_incomplete_prefix_coverage(
+        self,
+        _resolve_mock: mock.Mock,
+        _is_ancestor_mock: mock.Mock,
+        _git_mock: mock.Mock,
+        _remote_sha_mock: mock.Mock,
+    ) -> None:
+        evidence = {
+            key: value for key, value in self.evidence.items() if not key.startswith("_")
+        }
+        evidence["partial_merge_safety"] = dict(evidence["partial_merge_safety"])
+        evidence["partial_merge_safety"]["validated_prefixes"] = 1
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "publish_remote": "origin",
+            "integration_evidence": evidence,
+        }
+
+        with self.assertRaisesRegex(MODULE.SubmitError, "every submitted stack prefix"):
+            MODULE.validate_integration_evidence(
+                Path.cwd(),
+                manifest,
+                [{"_tip": "first"}, {"_tip": "final"}],
+            )
 
     def test_stacked_title_inserts_position_after_conventional_prefix(self) -> None:
         self.assertEqual(
