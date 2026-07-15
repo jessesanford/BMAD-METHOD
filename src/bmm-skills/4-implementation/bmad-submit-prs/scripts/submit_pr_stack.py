@@ -49,7 +49,7 @@ class SubmitError(RuntimeError):
 
 def is_transient_failure(message: str) -> bool:
     normalized = message.casefold()
-    return normalized.strip() == "eof" or any(
+    return bool(re.search(r"\beof\b", normalized)) or any(
         marker in normalized for marker in TRANSIENT_ERROR_MARKERS
     )
 

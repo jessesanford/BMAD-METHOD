@@ -85,6 +85,9 @@ class SubmitterTests(unittest.TestCase):
             MODULE.parse_remote("git@github.example.com:owner/repo.git"),
             ("github.example.com", "owner", "repo"),
         )
+        self.assertTrue(
+            MODULE.is_transient_failure('Post "https://api.github.example/graphql": EOF')
+        )
 
     @mock.patch.object(MODULE.time, "sleep")
     @mock.patch.object(MODULE.subprocess, "run")
