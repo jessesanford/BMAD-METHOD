@@ -11,6 +11,7 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   "default_base": "main",
   "base_sha": "FULL_TARGET_BASE_SHA",
   "stack_label": "feature-x",
+  "feature_name": "Feature X",
   "feature_summary": "Adds opt-in tracing across the migration-agent fleet.",
   "draft": false,
   "template_source": ".github/PULL_REQUEST_TEMPLATE.md",
@@ -73,6 +74,7 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   immutable base. Recommend `upstream` when it exists and `origin` otherwise, but require confirmation.
 - `publish_remote` records where the PR-ready heads and integration evidence live. Recommend `origin`
   for fork-to-upstream submissions and `target_remote` when both repositories are the same.
+- `feature_name` is the reviewer-facing feature name used by the merge gate, such as `Arize AX`.
 - `feature_summary` is a concise feature-level blurb repeated on implementation PRs beside the
   planning-PR link.
 - `stack_label` is 1-4 succinct, feature-derived lowercase keywords such as `arize-ax`. It need not
@@ -98,7 +100,8 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   namespace and avoid protected or existing feature branches.
 - Every PR base is `default_base`. Later PRs intentionally show cumulative diffs until earlier PRs merge.
 - `body_file` resolves relative to the manifest. It contains the upstream template plus layer-specific
-  content. The script appends deterministic navigation, links submitted PR titles in the full stack,
+  content. The script prepends a Stack Merge Gate listing every prerequisite PR, appends deterministic
+  common-base navigation, links submitted PR titles in the full stack,
   identifies the series as a stacked PR with a link to `https://www.stacking.dev/`, and adds the
   evidence-backed integration and partial-merge safety section to every PR.
 - Set `draft` when the complete stack should initially avoid normal ready-for-review signaling.
@@ -108,8 +111,9 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 Run the same manifest with `--manual --rendered-dir <directory>` to create numbered title/body files,
 `SUBMIT.md`, `manual-links.json`, and a journal without creating PRs. Submit in the order shown in
 `SUBMIT.md`. After creating PRs, add their 1-based `position`, `number`, and `url` to
-`manual-links.json`, then rerun with `--manual-links <file>` to regenerate descriptions whose prior
-stack nodes are clickable and whose future nodes remain Pending.
+`manual-links.json`, then rerun with `--manual-links <file>` before creating the next PR. Links must
+form a contiguous prefix; each refresh emits edits for existing PRs and creation instructions only
+for the next layer, while future nodes remain Pending.
 
 Use `--verbose` during automatic submission to show sanitized `git`/`gh` commands and per-layer
 progress. For enterprise repositories the script ignores `GH_TOKEN` (the GitHub.com token variable)

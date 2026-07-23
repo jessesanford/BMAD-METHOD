@@ -219,7 +219,11 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return manifest
 
 
-def load_manual_links(path: Path | None, layer_count: int) -> dict[int, dict[str, Any]]:
+def load_manual_links(
+    path: Path | None,
+    layer_count: int,
+    repository: str,
+) -> dict[int, dict[str, Any]]:
     if path is None:
         return {}
     try:
@@ -231,16 +235,24 @@ def load_manual_links(path: Path | None, layer_count: int) -> dict[int, dict[str
         position = item.get("position")
         number = item.get("number")
         url = item.get("url")
+        expected_url = (
+            f"{repository_web_url(repository)}/pull/{number}"
+            if isinstance(number, int)
+            else ""
+        )
         if (
             not isinstance(position, int)
             or not 1 <= position <= layer_count
             or not isinstance(number, int)
             or number < 1
             or not isinstance(url, str)
-            or not url.startswith(("https://", "http://"))
+            or url.rstrip("/").casefold() != expected_url.casefold()
         ):
             raise SubmitError("manual PR links require valid position, number, and URL fields")
         links[position - 1] = {"number": number, "url": url}
+    positions = sorted(links)
+    if positions and positions != list(range(positions[-1] + 1)):
+        raise SubmitError("manual PR links must form a contiguous prefix from position 1")
     return links
 
 
@@ -353,6 +365,7 @@ def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str,
         "publish_remote",
         "default_base",
         "base_sha",
+        "feature_name",
         "feature_summary",
         "stack_label",
     ):
@@ -454,20 +467,88 @@ def node_label(
     return (prefix + stacked_title(layer, index, count, stack_label)).replace('"', "'")
 
 
+def prerequisite_link(
+    index: int,
+    layers: list[dict[str, Any]],
+    links: dict[int, dict[str, Any]],
+    stack_label: str,
+) -> str:
+    pr = links.get(index)
+    title = stacked_title(layers[index], index, len(layers), stack_label)
+    if pr:
+        return f"[#{pr['number']} - {title}]({pr['url']})"
+    return f"PR {index + 1} - {title} (Pending)"
+
+
+def render_merge_warning(
+    layers: list[dict[str, Any]],
+    links: dict[int, dict[str, Any]],
+    current: int,
+    default_base: str,
+    stack_label: str,
+    feature_name: str,
+) -> str:
+    lines = [
+        "> [!WARNING]",
+        f"> **Stack Merge Gate ({current + 1}/{len(layers)})**",
+        ">",
+    ]
+    if current == 0:
+        lines.extend(
+            [
+                f"> This is the first PR in a series of PRs composing a PR stack for the {feature_name} feature.",
+                "> This is the planning PR. Please review all PRs in the stack in order.",
+                "> **Do not approve or merge any PR out of order or before its prerequisite PRs have been merged.**",
+                "> After this PR merges, refresh **Files changed** on later PRs.",
+                "> If prerequisite changes remain, stop: the remaining heads must be restacked before review.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"> This is PR {current + 1} of {len(layers)} in the PR stack for the {feature_name} feature.",
+                "> Please review all PRs in the stack in order.",
+                f"> **DO NOT APPROVE until every PR below is merged into `{default_base}`:**",
+                ">",
+            ]
+        )
+        for index in range(current):
+            lines.append(f"> {index + 1}. {prerequisite_link(index, layers, links, stack_label)}")
+        lines.extend(
+            [
+                ">",
+                "> After all listed PRs merge, refresh **Files changed**; "
+                "if prerequisite changes remain, stop and restack this head before review.",
+            ]
+        )
+    lines.extend(
+        [
+            ">",
+            "> See the **Stack PR Navigation** section below.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def render_navigation(
     layers: list[dict[str, Any]],
     links: dict[int, dict[str, Any]],
     current: int | None,
     default_base: str,
     stack_label: str,
+    head_owner: str,
 ) -> str:
-    lines = [MARKER, "## Stack navigation", ""]
+    lines = [MARKER, "## Stack PR Navigation", ""]
     if current is not None:
         lines.extend([f"**This PR:** {current + 1} of {len(layers)}", ""])
     lines.extend(
         [
-            "This PR is part of a [stacked pull request](https://www.stacking.dev/), split into",
-            "small, dependency-ordered changes for focused review.",
+            "This is a [stacked pull request](https://www.stacking.dev/) series. Every PR targets",
+            f"`{default_base}` and keeps its head on `{head_owner}`. Later PRs therefore show",
+            "cumulative changes until their prerequisite PRs merge. Review and merge strictly from the",
+            "first layer through the last; after each merge, refresh the remaining PRs so GitHub",
+            "recalculates their diffs. Squash or rebase merges may require restacking the remaining",
+            "heads; do not approve a PR while prerequisite changes remain in Files changed.",
             "",
         ]
     )
@@ -480,15 +561,34 @@ def render_navigation(
             lines.append(f"  L{index} --> L{index + 1}")
         if index in links:
             lines.append(f'  click L{index + 1} "{links[index]["url"]}" "Open PR"')
-    lines.extend(["```", "", "| # | Layer | Base | PR |", "|---:|---|---|---|"])
+    lines.extend(
+        [
+            "```",
+            "",
+            "| # | Layer | Must merge first | Base | Head | PR |",
+            "|---:|---|---|---|---|---|",
+        ]
+    )
     for index, layer in enumerate(layers):
-        base = f"`{default_base}`" if index == 0 else f"`{layers[index - 1]['remote_branch']}`"
         pr = links.get(index)
         link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
         rendered_title = stacked_title(layer, index, len(layers), stack_label)
         title = f"[{rendered_title}]({pr['url']})" if pr else f"{rendered_title} (Pending)"
         here = " **(this PR)**" if current == index else ""
-        lines.append(f"| {index + 1} | {title} - {layer['summary']}{here} | {base} | {link} |")
+        prerequisites = (
+            "None"
+            if index == 0
+            else ", ".join(
+                f"[#{links[prior]['number']}]({links[prior]['url']})"
+                if prior in links
+                else f"PR {prior + 1} (Pending)"
+                for prior in range(index)
+            )
+        )
+        lines.append(
+            f"| {index + 1} | {title} - {layer['summary']}{here} | {prerequisites} | "
+            f"`{default_base}` | `{head_owner}:{layer['remote_branch']}` | {link} |"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -500,6 +600,8 @@ def render_body(
     feature_summary: str,
     stack_label: str,
     integration_evidence: dict[str, Any],
+    head_owner: str,
+    feature_name: str,
 ) -> str:
     content = layers[index]["_body_file"].read_text(encoding="utf-8").rstrip()
     planning = links.get(0)
@@ -528,11 +630,27 @@ def render_body(
         f"- Built distributions: {builds}"
     )
     return (
-        content
+        render_merge_warning(
+            layers,
+            links,
+            index,
+            default_base,
+            stack_label,
+            feature_name,
+        )
+        + "\n\n"
+        + content
         + pointer
         + validation
         + "\n\n"
-        + render_navigation(layers, links, index, default_base, stack_label)
+        + render_navigation(
+            layers,
+            links,
+            index,
+            default_base,
+            stack_label,
+            head_owner,
+        )
     )
 
 
@@ -618,9 +736,11 @@ def render_manual_instructions(
         "",
         "Create the PRs from top to bottom. For each row, copy the numbered title file into the",
         "GitHub title field and the matching body file into the description field. The body files",
-        "use the same template and stack graph as automatic submission.",
+        "use the same template, explicit prerequisite warning, and stack graph as automatic submission.",
+        "Every PR targets the same base; do not approve a later PR until all PRs listed at its top",
+        "have merged and its Files changed view has been refreshed.",
         "",
-        "| # | Base | Head | Title | Body | Create | PR |",
+        "| # | Base | Head | Title | Body | Action | PR |",
         "|---:|---|---|---|---|---|---|",
     ]
     web_url = repository_web_url(manifest["repository"])
@@ -634,42 +754,56 @@ def render_manual_instructions(
         )
         pr = links.get(index)
         pr_link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
+        if pr:
+            action = "Update existing"
+        elif index == len(links):
+            action = f"[Create next]({create_url})"
+        else:
+            action = "Blocked"
         lines.append(
             f"| {position} | `{base}` | `{head}` | `{position:02d}-title.txt` | "
-            f"`{position:02d}-body.md` | [Open form]({create_url}) | {pr_link} |"
+            f"`{position:02d}-body.md` | {action} | {pr_link} |"
         )
     lines.extend(
         [
             "",
             "## Command-line alternative",
             "",
-            "Run each command from this package directory, in numeric order:",
+            "Run these commands from this package directory. Existing PRs are refreshed first, then",
+            "only the next unsubmitted layer is emitted; later layers stay blocked until it is recorded.",
             "",
             "```bash",
         ]
     )
     for index, layer in enumerate(layers):
         position = index + 1
-        base = manifest["default_base"]
-        lines.append(
-            f'gh pr create --repo "{manifest["repository"]}" --base "{base}" '
-            f'--head "{layer["_head_ref"]}" --title "$(cat {position:02d}-title.txt)" '
-            f'--body-file "{position:02d}-body.md"'
-        )
+        pr = links.get(index)
+        if pr:
+            lines.append(
+                f'gh pr edit "{pr["url"]}" --title "$(cat {position:02d}-title.txt)" '
+                f'--body-file "{position:02d}-body.md"'
+            )
+        elif index == len(links):
+            lines.append(
+                f'gh pr create --repo "{manifest["repository"]}" '
+                f'--base "{manifest["default_base"]}" '
+                f'--head "{layer["_head_ref"]}" --title "$(cat {position:02d}-title.txt)" '
+                f'--body-file "{position:02d}-body.md"'
+            )
+    lines.append("```")
     lines.extend(
         [
-            "```",
             "",
             "## Make submitted PRs clickable in later descriptions",
             "",
-            f"Record each created PR in `{links_path.name}` using its 1-based stack position:",
+            f"After creating each PR, record it in `{links_path.name}` using its 1-based stack position:",
             "",
             "```json",
             '{"prs":[{"position":1,"number":123,"url":"https://github.example/owner/repo/pull/123"}]}',
             "```",
             "",
-            "Then rerun manual packaging. Existing positions become clickable in every regenerated graph;",
-            "future positions remain clearly marked Pending:",
+            "Rerun manual packaging before creating the next PR. Existing positions become clickable in",
+            "every regenerated merge gate and graph; future positions remain clearly marked Pending:",
             "",
             "```bash",
             f'uv run "{Path(__file__).resolve()}" "{manifest_path}" --manual '
@@ -683,6 +817,7 @@ def render_manual_instructions(
                 None,
                 manifest["default_base"],
                 manifest["stack_label"],
+                manifest["_head_owner"],
             ).rstrip(),
             "",
         ]
@@ -977,7 +1112,11 @@ def submit(
     manifest = load_manifest(manifest_path)
     configure_command_environment(manifest["repository"])
     layers = validate(repo, manifest_path, manifest)
-    links = load_manual_links(manual_links, len(layers)) if manual else {}
+    links = (
+        load_manual_links(manual_links, len(layers), manifest["repository"])
+        if manual
+        else {}
+    )
     journal: dict[str, Any] = {
         "status": "preflight",
         "repository": manifest["repository"],
@@ -1010,6 +1149,8 @@ def submit(
                 manifest["feature_summary"],
                 manifest["stack_label"],
                 manifest["integration_evidence"],
+                manifest["_head_owner"],
+                manifest["feature_name"],
             ),
             encoding="utf-8",
         )
@@ -1077,6 +1218,8 @@ def submit(
             manifest["feature_summary"],
             manifest["stack_label"],
             manifest["integration_evidence"],
+            manifest["_head_owner"],
+            manifest["feature_name"],
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
@@ -1116,6 +1259,8 @@ def submit(
             manifest["feature_summary"],
             manifest["stack_label"],
             manifest["integration_evidence"],
+            manifest["_head_owner"],
+            manifest["feature_name"],
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
             handle.write(body)
@@ -1135,6 +1280,7 @@ def submit(
             index,
             manifest["default_base"],
             manifest["stack_label"],
+            manifest["_head_owner"],
         )
         upsert_navigation_comment(repo, manifest, links[index], navigation)
         expected_base = manifest["default_base"]

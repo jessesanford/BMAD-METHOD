@@ -1,6 +1,6 @@
 ---
 name: bmad-submit-prs
-description: 'Submit a validated PR-ready branch stack with one target base, fork-hosted heads, stack maps, and durable cross-links. Use when the user says "submit the stacked PRs", "open the PR stack", or "publish the PR-ready branches".'
+description: 'Submit a validated PR-ready branch stack with one target base, fork-hosted heads, explicit merge gates, stack maps, and durable cross-links. Use when the user says "submit the stacked PRs", "open the PR stack", or "publish the PR-ready branches".'
 ---
 
 # Submit Stacked PRs Workflow
@@ -74,6 +74,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   state the exact test result and built artifacts, and explain why each dependency-ordered partial
   merge is safe. When safety relies on a feature flag, name it, prove it defaults disabled, and state
   that the disabled path does not import or initialize the gated runtime.</action>
+  <action>Start every body with a warning that lists and links each prerequisite PR. The first PR
+  identifies itself as the planning PR. Require reviewers to merge in order, refresh Files changed,
+  and stop for restacking if prerequisite changes remain.</action>
 </step>
 
 <step n="3" goal="Create a fail-closed submission manifest">
@@ -97,8 +100,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
     `NN-title.txt` and `NN-body.md` files, `SUBMIT.md`, `manual-links.json`, and the journal without
     creating or editing any PR. `SUBMIT.md` gives exact web and `gh` submission instructions, base/head
     pairs, and review order. Tell the user where the package, instructions, manifest, and journal live.
-    When the user records submitted PR numbers/URLs in `manual-links.json`, rerun with
-    `--manual-links` so prior nodes become clickable while future nodes stay Pending. Then skip the
+    After each created PR, record its number/URL in `manual-links.json` and rerun with
+    `--manual-links` before creating the next, so merge gates link all prerequisites while future
+    nodes stay Pending. Each refresh edits existing PRs and emits only the next create action. Then skip the
     automatic-submission actions below.
   </check>
   <check if="the user chose automatic submission">
@@ -108,8 +112,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>Reuse an open PR only when head and base match; refuse closed, duplicate, or mismatched state.
   Persist after each success. Retry transient reads and idempotent writes with bounded backoff, but
   leave ambiguous creates to an idempotent rerun that reconciles remote state from the journal.</action>
-  <action>During sequential creation, prior PR titles and graph nodes are clickable and future nodes
-  are marked pending. Explain stacked PRs with a link to `https://www.stacking.dev/`. After all PRs
+  <action>During sequential creation, explicit merge gates, prior PR titles, and graph nodes are
+  clickable while future nodes are marked pending. Explain stacked PRs with a link to
+  `https://www.stacking.dev/`. After all PRs
   exist, update every body and one marker comment per PR with the complete linked graph and ordered
   table. Do not create duplicate navigation comments on retry.</action>
   <check if="branch publication or PR submission fails after side effects begin">
@@ -128,8 +133,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>For automatic submission, report the planning PR first, then a table of every PR number,
   clickable URL, base/head branch, source SHA, and status. For manual submission, do not invent a PR
   summary; report the package, instructions, title/body files, manifest, links file, and journal paths.</action>
-  <action>Explain merge order: land PRs from 1 through N and refresh later cumulative diffs after each
-  prerequisite merge. Never delete publish-remote stack branches until their PRs merge
+  <action>Explain merge order: land PRs strictly from 1 through N and refresh later cumulative diffs
+  after each prerequisite merge. Stop and restack when prerequisite changes remain. Never delete
+  publish-remote stack branches until their PRs merge
   or close.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
