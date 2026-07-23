@@ -1,12 +1,12 @@
 ---
 name: bmad-submit-prs
-description: 'Submit a validated PR-ready branch stack as ordered, reviewer-friendly GitHub pull requests with templates, dependency bases, stack maps, and durable cross-links. Use when the user says "submit the stacked PRs", "open the PR stack", or "publish the PR-ready branches".'
+description: 'Submit a validated PR-ready branch stack with one target base, fork-hosted heads, stack maps, and durable cross-links. Use when the user says "submit the stacked PRs", "open the PR stack", or "publish the PR-ready branches".'
 ---
 
 # Submit Stacked PRs Workflow
 
-**Goal:** Submit a PR-ready stack as focused legacy GitHub pull requests. Create the planning PR first,
-then implementation PRs in dependency order, and fully cross-link every PR.
+**Goal:** Submit a PR-ready stack as ordered GitHub pull requests against one target base while
+keeping exact heads on the selected publish remote.
 
 **Your Role:** Stacked-PR release operator. The LLM explains intent, risk, and
 review guidance using the upstream template. Deterministic tooling validates refs and permissions,
@@ -40,22 +40,19 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   evidence branch whose exact commit descends from the final layer and contains a committed validation
   report. The report must record the exact test command and counts, successful distribution builds
   with artifact hashes, and an explicit prefix-by-prefix partial-merge result.</action>
-  <action>Enumerate local Git remotes and resolve each repository and default branch. Ask the user
-  which remote should receive the PRs, recommending `upstream` when it exists and `origin` otherwise.
-  Then ask which branch on that remote should be the first PR's base, recommending that remote's
-  default branch. Do not infer acceptance from an earlier run or create a manifest before both
-  choices are confirmed.</action>
-  <action>Show the selected remote, repository, base branch, and exact base SHA. If another canonical
+  <action>Enumerate local Git remotes and resolve each repository and default branch. Ask which target
+  remote and branch every PR should use, then which publish remote should retain the PR-ready heads
+  and integration evidence. Recommend `origin` for fork-hosted heads. Do not infer acceptance from an
+  earlier run.</action>
+  <action>Show the selected target remote, repository, common base, exact base SHA, publish remote,
+  and head repository. If another canonical
   remote exists, show whether its corresponding base has the same SHA; divergence requires explicit
   user confirmation before proceeding.</action>
   <action>Ask whether to submit automatically or generate a manual submission package, recommending
   automatic submission by default. Confirm the choice before creating any PR. Both modes use the same
   titles, upstream template or fallback template, body content, ordering, and stack navigation.</action>
-  <critical>Legacy GitHub can show focused chained diffs only when every PR base branch exists in the
-  selected repository. A multi-PR fork stack cannot use a branch in one repository as a base in
-  another. Therefore publish every PR-ready head to the selected repository, with explicit user
-  authorization and push permission, before creating PRs. Never silently fall back to cumulative
-  PRs against the selected base.</critical>
+  <critical>Every PR uses the one confirmed target base. Publish exact heads only to the confirmed
+  publish remote. Later PRs intentionally show cumulative diffs until their predecessors merge.</critical>
   <action>Create a run directory beneath the Git directory:
   `bmad-submit-prs/&lt;UTC timestamp&gt;/`. Persist the manifest, rendered bodies, preflight report,
   and submission journal there.</action>
@@ -80,10 +77,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
 </step>
 
 <step n="3" goal="Create a fail-closed submission manifest">
-  <action>Write the schema in `references/submission-manifest.md`. Use upstream-hosted `remote_branch`
-  names for every layer and exact local `tip` SHAs. Include the required structured
-  `integration_evidence`; unsupported prose claims are not a substitute. The first PR targets upstream
-  main; every later PR targets the prior layer's remote branch.</action>
+  <action>Write the schema in `references/submission-manifest.md`. Record explicit target and publish
+  remotes, the common base and exact SHA, publish-remote branch names, and exact local `tip` SHAs.
+  Include the required structured `integration_evidence`; unsupported prose claims are not a substitute.</action>
   <action>Run
   `uv run {skill-root}/scripts/submit_pr_stack.py &lt;manifest&gt; --dry-run --output &lt;journal&gt;`.
   Review titles, bases, heads, SHAs, bodies, table, and graph; add `--verbose` for sanitized commands
@@ -107,8 +103,8 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   </check>
   <check if="the user chose automatic submission">
   <action>After human-visible dry-run approval, run the script with `--apply`. The script preflights all
-  remote and GitHub invariants before side effects, publishes exact SHAs with force-with-lease, creates
-  the planning PR first, and creates each subsequent PR against the prior upstream-hosted layer.</action>
+  remote and GitHub invariants before side effects, verifies the fork network and exact target base,
+  publishes exact SHAs with force-with-lease, and creates every PR against the common target base.</action>
   <action>Reuse an open PR only when head and base match; refuse closed, duplicate, or mismatched state.
   Persist after each success. Retry transient reads and idempotent writes with bounded backoff, but
   leave ambiguous creates to an idempotent rerun that reconciles remote state from the journal.</action>
@@ -132,8 +128,8 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>For automatic submission, report the planning PR first, then a table of every PR number,
   clickable URL, base/head branch, source SHA, and status. For manual submission, do not invent a PR
   summary; report the package, instructions, title/body files, manifest, links file, and journal paths.</action>
-  <action>Explain merge order: land from the bottom of the stack upward, then rebase/retarget remaining
-  layers as the hosting platform requires. Never delete upstream stack branches until their PRs merge
+  <action>Explain merge order: land PRs from 1 through N and refresh later cumulative diffs after each
+  prerequisite merge. Never delete publish-remote stack branches until their PRs merge
   or close.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>

@@ -144,6 +144,21 @@ def gh(
     return run(["gh", *args, "--repo", repository], repo, retry_transient=retry_transient)
 
 
+def gh_api(
+    repo: Path,
+    repository: str,
+    endpoint: str,
+    *args: str,
+    retry_transient: bool = True,
+) -> str:
+    host, _, _ = split_repository(repository)
+    command = ["gh", "api"]
+    if host:
+        command.extend(["--hostname", host])
+    command.extend([endpoint, *args])
+    return run(command, repo, retry_transient=retry_transient)
+
+
 def resolve(repo: Path, revision: str) -> str:
     return git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}")
 
@@ -199,8 +214,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SubmitError(f"cannot read manifest: {exc}") from exc
-    if manifest.get("schema_version") != 1 or not manifest.get("layers"):
-        raise SubmitError("manifest requires schema_version 1 and non-empty layers")
+    if manifest.get("schema_version") != 2 or not manifest.get("layers"):
+        raise SubmitError("manifest requires schema_version 2 and non-empty layers")
     return manifest
 
 
@@ -321,7 +336,7 @@ def validate_integration_evidence(
     if any(value not in report for value in required_report_content):
         raise SubmitError("committed integration report does not substantiate the manifest evidence")
 
-    web_url = repository_web_url(manifest["repository"])
+    web_url = repository_web_url(manifest["_head_repository"])
     evidence["_commit"] = commit
     evidence["_branch_url"] = f"{web_url}/tree/{quote(evidence['branch'], safe='/')}"
     evidence["_report_url"] = (
@@ -332,25 +347,65 @@ def validate_integration_evidence(
 def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     if git(repo, "status", "--porcelain"):
         raise SubmitError("worktree must be clean")
-    for field in ("repository", "publish_remote", "default_base", "feature_summary", "stack_label"):
+    for field in (
+        "repository",
+        "target_remote",
+        "publish_remote",
+        "default_base",
+        "base_sha",
+        "feature_summary",
+        "stack_label",
+    ):
         if not manifest.get(field):
             raise SubmitError(f"manifest missing {field}")
+    if not isinstance(manifest.get("draft"), bool):
+        raise SubmitError("manifest draft must be a JSON boolean")
     if (
         len(manifest["stack_label"]) > 24
         or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+){0,3}", manifest["stack_label"])
     ):
         raise SubmitError("stack_label must be 1-4 lowercase keywords, at most 24 characters")
     expected_host, expected_owner, expected_name = split_repository(manifest["repository"])
-    remote_url = git(repo, "remote", "get-url", manifest["publish_remote"])
-    host, owner, name = parse_remote(remote_url)
-    if (owner.lower(), name.lower()) != (expected_owner.lower(), expected_name.lower()):
-        raise SubmitError("publish_remote does not point to the manifest repository")
-    if expected_host and host and expected_host.lower() != host.lower():
-        raise SubmitError("publish_remote host does not match the manifest repository")
+    target_url = git(repo, "remote", "get-url", manifest["target_remote"])
+    target_host, target_owner, target_name = parse_remote(target_url)
+    manifest_host = expected_host or "github.com"
+    if (target_owner.lower(), target_name.lower()) != (
+        expected_owner.lower(),
+        expected_name.lower(),
+    ):
+        raise SubmitError("target_remote does not point to the manifest repository")
+    if not target_host or manifest_host.lower() != target_host.lower():
+        raise SubmitError("target_remote host does not match the manifest repository")
+
+    publish_url = git(repo, "remote", "get-url", manifest["publish_remote"])
+    publish_host, publish_owner, publish_name = parse_remote(publish_url)
+    if not publish_host or not target_host or target_host.lower() != publish_host.lower():
+        raise SubmitError("target and publish remotes must use the same GitHub host")
+    manifest["_head_owner"] = publish_owner
+    manifest["_head_repository"] = (
+        f"{publish_host}/{publish_owner}/{publish_name}"
+        if publish_host
+        else f"{publish_owner}/{publish_name}"
+    )
+    manifest["_cross_repository"] = (
+        publish_owner.casefold(),
+        publish_name.casefold(),
+    ) != (
+        target_owner.casefold(),
+        target_name.casefold(),
+    )
+
     targets: set[str] = set()
     prior: str | None = None
     layers = manifest["layers"]
-    stack_base = resolve(repo, f"refs/remotes/{manifest['publish_remote']}/{manifest['default_base']}")
+    stack_base = resolve(repo, f"refs/remotes/{manifest['target_remote']}/{manifest['default_base']}")
+    if not re.fullmatch(r"[0-9a-f]{40}", manifest["base_sha"]):
+        raise SubmitError("base_sha must be a full 40-character commit SHA")
+    recorded_base = resolve(repo, manifest["base_sha"])
+    if manifest["base_sha"] != recorded_base:
+        raise SubmitError("base_sha must be the exact resolved target base commit")
+    if recorded_base != stack_base:
+        raise SubmitError("target base branch drifted from manifest base_sha")
     for index, layer in enumerate(layers):
         missing = [
             field
@@ -372,11 +427,18 @@ def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str,
         if layer["remote_branch"] in targets:
             raise SubmitError(f"duplicate remote branch: {layer['remote_branch']}")
         targets.add(layer["remote_branch"])
+        layer["_head_ref"] = (
+            f"{publish_owner}:{layer['remote_branch']}"
+            if manifest["_cross_repository"]
+            else layer["remote_branch"]
+        )
         expected_parent = prior or stack_base
         if not is_ancestor(repo, expected_parent, layer["_tip"]):
             raise SubmitError(f"layer {index + 1} does not descend from layer {index}")
         prior = layer["_tip"]
     validate_integration_evidence(repo, manifest, layers)
+    if manifest["integration_evidence"]["branch"] in targets:
+        raise SubmitError("integration evidence branch must differ from component PR branches")
     return layers
 
 
@@ -502,6 +564,39 @@ def repository_web_url(repository: str) -> str:
     return f"https://{host or 'github.com'}/{owner}/{name}"
 
 
+def repository_network_root(repository: dict[str, Any]) -> str:
+    source = repository.get("source")
+    if isinstance(source, dict) and isinstance(source.get("full_name"), str):
+        return source["full_name"].casefold()
+    return repository["full_name"].casefold()
+
+
+def github_repository_preflight(repo: Path, manifest: dict[str, Any]) -> None:
+    host, owner, name = split_repository(manifest["repository"])
+    _, head_owner, head_name = split_repository(manifest["_head_repository"])
+    progress(
+        "preflight",
+        f"checking target {manifest['repository']} and fork heads {manifest['_head_repository']}",
+    )
+    if host:
+        run(["gh", "auth", "status", "--hostname", host], repo, retry_transient=True)
+    target = json.loads(gh_api(repo, manifest["repository"], f"repos/{owner}/{name}"))
+    source = json.loads(
+        gh_api(repo, manifest["repository"], f"repos/{head_owner}/{head_name}")
+    )
+    if not source.get("permissions", {}).get("push"):
+        raise SubmitError("authenticated user lacks push permission for fork head branches")
+    if (
+        manifest["_cross_repository"]
+        and repository_network_root(source) != repository_network_root(target)
+    ):
+        raise SubmitError("publish_remote repository is not in the target repository's fork network")
+
+    target_base = remote_sha(repo, manifest["target_remote"], manifest["default_base"])
+    if target_base != manifest["base_sha"]:
+        raise SubmitError("target base branch moved after manifest creation")
+
+
 def render_manual_instructions(
     manifest: dict[str, Any],
     layers: list[dict[str, Any]],
@@ -514,8 +609,9 @@ def render_manual_instructions(
     lines = [
         "# Manual stacked PR submission",
         "",
-        f"**Repository:** `{manifest['repository']}`  ",
-        f"**First base:** `{manifest['default_base']}`  ",
+        f"**Target repository:** `{manifest['repository']}`  ",
+        f"**Head repository:** `{manifest['_head_repository']}`  ",
+        f"**Base for every PR:** `{manifest['default_base']}`  ",
         f"**PR count:** {len(layers)}",
         "",
         "## Submit in this order",
@@ -530,9 +626,12 @@ def render_manual_instructions(
     web_url = repository_web_url(manifest["repository"])
     for index, layer in enumerate(layers):
         position = index + 1
-        base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
-        head = layer["remote_branch"]
-        create_url = f"{web_url}/compare/{quote(base, safe='/')}...{quote(head, safe='/')}?expand=1"
+        base = manifest["default_base"]
+        head = layer["_head_ref"]
+        create_url = (
+            f"{web_url}/compare/{quote(base, safe='/')}..."
+            f"{quote(head, safe='/:')}?expand=1"
+        )
         pr = links.get(index)
         pr_link = f"[#{pr['number']}]({pr['url']})" if pr else "Pending"
         lines.append(
@@ -551,10 +650,10 @@ def render_manual_instructions(
     )
     for index, layer in enumerate(layers):
         position = index + 1
-        base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
+        base = manifest["default_base"]
         lines.append(
             f'gh pr create --repo "{manifest["repository"]}" --base "{base}" '
-            f'--head "{layer["remote_branch"]}" --title "$(cat {position:02d}-title.txt)" '
+            f'--head "{layer["_head_ref"]}" --title "$(cat {position:02d}-title.txt)" '
             f'--body-file "{position:02d}-body.md"'
         )
     lines.extend(
@@ -592,63 +691,74 @@ def render_manual_instructions(
 
 
 def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str, Any]]) -> None:
-    host, owner, name = split_repository(manifest["repository"])
-    progress("preflight", f"checking authentication and push permission for {manifest['repository']}")
-    if host:
-        run(["gh", "auth", "status", "--hostname", host], repo, retry_transient=True)
-    endpoint = f"repos/{owner}/{name}"
-    permission = ["gh", "api"]
-    if host:
-        permission.extend(["--hostname", host])
-    permission.extend([endpoint, "--jq", ".permissions.push"])
-    if run(permission, repo, retry_transient=True) != "true":
-        raise SubmitError("authenticated user lacks push permission for upstream stack branches")
+    github_repository_preflight(repo, manifest)
     repository = manifest["repository"]
     for index, layer in enumerate(layers):
-        expected_base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
+        expected_base = manifest["default_base"]
         progress(
             "preflight",
-            f"{index + 1}/{len(layers)}: {layer['remote_branch']} -> {expected_base}",
+            f"{index + 1}/{len(layers)}: {layer['_head_ref']} -> {expected_base}",
         )
-        existing = pull_requests_for_head(repo, repository, layer["remote_branch"])
+        existing = pull_requests_for_head(
+            repo,
+            repository,
+            manifest["_head_owner"],
+            layer["remote_branch"],
+        )
         if len(existing) > 1:
             raise SubmitError(f"multiple PRs exist for {layer['remote_branch']}")
         if existing:
             pr = existing[0]
-            if pr["state"] != "OPEN" or pr["baseRefName"] != expected_base:
+            if (
+                pr["state"] != "OPEN"
+                or pr["baseRefName"] != expected_base
+                or pr["headRepositoryOwner"].casefold()
+                != manifest["_head_owner"].casefold()
+            ):
                 raise SubmitError(f"existing PR conflicts for {layer['remote_branch']}")
             if bool(pr["isDraft"]) != bool(manifest.get("draft")):
                 raise SubmitError(f"existing PR draft state conflicts for {layer['remote_branch']}")
+            if pr["headRefOid"] != layer["_tip"]:
+                raise SubmitError(
+                    f"refusing to rewrite existing PR head: {layer['remote_branch']}"
+                )
             layer["_existing_pr"] = pr
         published = remote_sha(repo, manifest["publish_remote"], layer["remote_branch"])
         if published and published != layer["_tip"] and not existing:
             raise SubmitError(
-                f"refusing to replace unowned upstream branch without an open PR: {layer['remote_branch']}"
+                f"refusing to replace unowned fork branch without an open PR: {layer['remote_branch']}"
             )
 
 
 def pull_requests_for_head(
     repo: Path,
     repository: str,
+    head_owner: str,
     remote_branch: str,
 ) -> list[dict[str, Any]]:
-    return json.loads(
-        gh(
+    _, owner, name = split_repository(repository)
+    head = quote(f"{head_owner}:{remote_branch}", safe=":")
+    payload = json.loads(
+        gh_api(
             repo,
             repository,
-            "pr",
-            "list",
-            "--state",
-            "all",
-            "--head",
-            remote_branch,
-            "--limit",
-            "100",
-            "--json",
-            "number,url,state,isDraft,baseRefName,headRefName",
+            f"repos/{owner}/{name}/pulls?state=all&head={head}&per_page=100",
         )
         or "[]"
     )
+    return [
+        {
+            "number": item["number"],
+            "url": item["html_url"],
+            "state": item["state"].upper(),
+            "isDraft": bool(item["draft"]),
+            "baseRefName": item["base"]["ref"],
+            "headRefName": item["head"]["ref"],
+            "headRefOid": item["head"]["sha"],
+            "headRepositoryOwner": item["head"]["repo"]["owner"]["login"],
+        }
+        for item in payload
+    ]
 
 
 def reconcile_created_pull_request(
@@ -657,7 +767,12 @@ def reconcile_created_pull_request(
     layer: dict[str, Any],
     expected_base: str,
 ) -> dict[str, Any] | None:
-    existing = pull_requests_for_head(repo, manifest["repository"], layer["remote_branch"])
+    existing = pull_requests_for_head(
+        repo,
+        manifest["repository"],
+        manifest["_head_owner"],
+        layer["remote_branch"],
+    )
     if not existing:
         return None
     if len(existing) > 1:
@@ -666,6 +781,8 @@ def reconcile_created_pull_request(
     if (
         pr["state"] != "OPEN"
         or pr["baseRefName"] != expected_base
+        or pr["headRefOid"] != layer["_tip"]
+        or pr["headRepositoryOwner"].casefold() != manifest["_head_owner"].casefold()
         or bool(pr["isDraft"]) != bool(manifest.get("draft"))
     ):
         raise SubmitError(f"ambiguous PR creation conflicts for {layer['remote_branch']}")
@@ -686,7 +803,7 @@ def create_pull_request(
         "--base",
         base,
         "--head",
-        layer["remote_branch"],
+        layer["_head_ref"],
         "--title",
         title,
         "--body-file",
@@ -708,16 +825,16 @@ def create_pull_request(
                 "state": "OPEN",
             }
         except SubmitError as exc:
-            if not is_transient_failure(str(exc)):
-                raise
             progress(
                 "submit",
-                f"ambiguous create for {layer['remote_branch']}; checking remote state",
+                f"create failed for {layer['remote_branch']}; checking remote state",
             )
             existing = reconcile_created_pull_request(repo, manifest, layer, base)
             if existing:
-                progress("submit", f"reconciled PR #{existing['number']} after transport failure")
+                progress("submit", f"reconciled PR #{existing['number']} after create failure")
                 return existing
+            if not is_transient_failure(str(exc)):
+                raise
             if attempt == RETRY_ATTEMPTS:
                 raise
             retry_delay(attempt, "gh pr create")
@@ -864,7 +981,9 @@ def submit(
     journal: dict[str, Any] = {
         "status": "preflight",
         "repository": manifest["repository"],
+        "head_repository": manifest["_head_repository"],
         "default_base": manifest["default_base"],
+        "base_sha": manifest["base_sha"],
         "stack_label": manifest["stack_label"],
         "template_source": manifest.get("template_source"),
         "integration_evidence": {
@@ -899,7 +1018,8 @@ def submit(
                 "branch": layer["branch"],
                 "remote_branch": layer["remote_branch"],
                 "tip": layer["_tip"],
-                "base": manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"],
+                "base": manifest["default_base"],
+                "head": layer["_head_ref"],
                 "title": title,
                 "source_title": layer["title"],
                 "rendered_title": str(title_path),
@@ -908,6 +1028,7 @@ def submit(
         )
     write_journal(output, journal)
     if manual:
+        github_repository_preflight(repo, manifest)
         verify_published_layers(repo, manifest, layers)
         links_path = manual_links or destination / "manual-links.json"
         if not links_path.exists():
@@ -940,7 +1061,7 @@ def submit(
         progress("publish", f"{index + 1}/{len(layers)}: {layer['remote_branch']}")
         publish(repo, manifest, layer)
     for index, layer in enumerate(layers):
-        base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
+        base = manifest["default_base"]
         existing = layer.get("_existing_pr")
         title = stacked_title(layer, index, len(layers), manifest["stack_label"])
         action = "updating" if existing else "creating"
@@ -1016,7 +1137,7 @@ def submit(
             manifest["stack_label"],
         )
         upsert_navigation_comment(repo, manifest, links[index], navigation)
-        expected_base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
+        expected_base = manifest["default_base"]
         verify_pull_request(repo, manifest, layer, expected_base, links[index])
     journal["status"] = "complete"
     write_journal(output, journal)

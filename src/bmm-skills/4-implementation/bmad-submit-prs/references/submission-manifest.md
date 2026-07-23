@@ -4,10 +4,12 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "repository": "github.example.com/upstream/project",
-  "publish_remote": "upstream",
+  "target_remote": "upstream",
+  "publish_remote": "origin",
   "default_base": "main",
+  "base_sha": "FULL_TARGET_BASE_SHA",
   "stack_label": "feature-x",
   "feature_summary": "Adds opt-in tracing across the migration-agent fleet.",
   "draft": false,
@@ -67,9 +69,10 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 ```
 
 - `repository` is `[HOST/]OWNER/REPO` in `gh` syntax.
-- `repository`, `publish_remote`, and `default_base` record the user's confirmed target. Recommend
-  `upstream` when that remote exists locally and `origin` otherwise; never bake the recommendation
-  into the script as an implicit choice.
+- `repository`, `target_remote`, `default_base`, and `base_sha` record the confirmed PR target and
+  immutable base. Recommend `upstream` when it exists and `origin` otherwise, but require confirmation.
+- `publish_remote` records where the PR-ready heads and integration evidence live. Recommend `origin`
+  for fork-to-upstream submissions and `target_remote` when both repositories are the same.
 - `feature_summary` is a concise feature-level blurb repeated on implementation PRs beside the
   planning-PR link.
 - `stack_label` is 1-4 succinct, feature-derived lowercase keywords such as `arize-ax`. It need not
@@ -83,16 +86,17 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   - Every `builds` entry must have `status: "passed"` and the SHA-256 digest of the built artifact.
   - `partial_merge_safety` must report every submitted prefix as validated and list its exact ordered
     tip in `prefix_tips`. Its feature flag must default to disabled and state what the disabled path avoids.
-  - The script derives a live integration-branch link and an immutable report permalink. It refuses
+  - The script derives links from the publish-remote repository. It refuses
     to render test, build, or partial-merge claims when any invariant is missing or inconsistent.
-- `publish_remote` must resolve to that same repository. This requirement is what permits each PR to
-  use the prior layer as its GitHub base and show only its focused diff.
+- `target_remote` must resolve to `repository`; `publish_remote` may resolve to that repository or a
+  fork on the same GitHub host. Cross-repository submissions fail closed unless the publish repository
+  belongs to the target repository's fork network.
 - `branch` is an existing local PR-ready branch; `tip` is its immutable full SHA.
 - `title` uses a conventional prefix. The script inserts `(stacked-pr: <stack_label> [N/X])`
   immediately before its colon in rendered files, navigation, and submitted PR titles.
-- `remote_branch` is the branch published in the upstream repository. Prefer an isolated contributor
+- `remote_branch` is the branch published on `publish_remote`. Prefer an isolated contributor
   namespace and avoid protected or existing feature branches.
-- The first PR base is `default_base`; each later PR base is the prior `remote_branch`.
+- Every PR base is `default_base`. Later PRs intentionally show cumulative diffs until earlier PRs merge.
 - `body_file` resolves relative to the manifest. It contains the upstream template plus layer-specific
   content. The script appends deterministic navigation, links submitted PR titles in the full stack,
   identifies the series as a stacked PR with a link to `https://www.stacking.dev/`, and adds the
