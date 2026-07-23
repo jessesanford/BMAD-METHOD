@@ -383,6 +383,39 @@ class SubmitterTests(unittest.TestCase):
 
         retry_delay_mock.assert_not_called()
 
+
+    @mock.patch.object(
+        MODULE,
+        "gh",
+        return_value="https://example.test/owner/repo/pull/41",
+    )
+    def test_create_uses_fork_head_common_base_and_stages_draft(
+        self,
+        gh_mock: mock.Mock,
+    ) -> None:
+        pr = MODULE.create_pull_request(
+            Path.cwd(),
+            {
+                "repository": "example.test/owner/repo",
+                "draft": False,
+                "_head_owner": "contributor",
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "contributor:stack/story-pr-ready",
+                "title": "feat: story",
+            },
+            "main",
+            "/tmp/body.md",
+            "feat(stacked-pr: feature-x [2/2]): story",
+        )
+
+        arguments = gh_mock.call_args.args
+        self.assertIn("main", arguments)
+        self.assertIn("contributor:stack/story-pr-ready", arguments)
+        self.assertIn("--draft", arguments)
+        self.assertEqual(pr["number"], 41)
+
     @mock.patch.object(MODULE, "retry_delay")
     @mock.patch.object(MODULE, "reconcile_created_pull_request")
     @mock.patch.object(MODULE, "gh")
@@ -420,6 +453,39 @@ class SubmitterTests(unittest.TestCase):
         reconcile_mock.assert_called_once()
         retry_delay_mock.assert_not_called()
 
+
+    def test_reconcile_create_requires_exact_draft_head(self) -> None:
+        layer = {
+            "remote_branch": "stack/story-pr-ready",
+            "_tip": "a" * 40,
+        }
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "_head_owner": "contributor",
+        }
+        conflicting = {
+            "number": 41,
+            "url": "https://example.test/pull/41",
+            "state": "OPEN",
+            "isDraft": False,
+            "baseRefName": "main",
+            "headRefName": "stack/story-pr-ready",
+            "headRefOid": "b" * 40,
+            "headRepositoryOwner": "contributor",
+        }
+        with mock.patch.object(
+            MODULE,
+            "pull_requests_for_head",
+            return_value=[conflicting],
+        ):
+            with self.assertRaisesRegex(MODULE.SubmitError, "ambiguous PR creation"):
+                MODULE.reconcile_created_pull_request(
+                    Path.cwd(),
+                    manifest,
+                    layer,
+                    "main",
+                )
+
     def test_manual_instructions_include_order_files_and_graph(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -447,10 +513,10 @@ class SubmitterTests(unittest.TestCase):
         self.assertEqual(rendered.count('--base "main"'), 1)
         self.assertNotIn('--base "stack/plan-pr-ready"', rendered)
         self.assertIn('--head "contributor:stack/story-pr-ready"', rendered)
-        self.assertIn('--body-file "02-body.md"', rendered)
+        self.assertIn('--body-file "02-body.md" --draft', rendered)
         self.assertNotIn('gh pr create --repo "github.example.com/owner/repo" --base "main" '
                          '--head "contributor:stack/plan-pr-ready"', rendered)
-        self.assertIn('Create next', rendered)
+        self.assertIn('Create draft', rendered)
         self.assertIn('gh pr edit "https://github.example.com/owner/repo/pull/41"', rendered)
 
     def test_manual_links_use_one_based_positions(self) -> None:

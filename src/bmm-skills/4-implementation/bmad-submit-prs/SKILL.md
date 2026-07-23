@@ -108,15 +108,17 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <check if="the user chose automatic submission">
   <action>After human-visible dry-run approval, run the script with `--apply`. The script preflights all
   remote and GitHub invariants before side effects, verifies the fork network and exact target base,
-  publishes exact SHAs with force-with-lease, and creates every PR against the common target base.</action>
+  publishes exact SHAs with force-with-lease, and creates every PR against the common target base.
+  New PRs begin as drafts so no partial body becomes ready for review.</action>
   <action>Reuse an open PR only when head and base match; refuse closed, duplicate, or mismatched state.
   Persist after each success. Retry transient reads and idempotent writes with bounded backoff, but
   leave ambiguous creates to an idempotent rerun that reconciles remote state from the journal.</action>
   <action>During sequential creation, explicit merge gates, prior PR titles, and graph nodes are
   clickable while future nodes are marked pending. Explain stacked PRs with a link to
   `https://www.stacking.dev/`. After all PRs
-  exist, update every body and one marker comment per PR with the complete linked graph and ordered
-  table. Do not create duplicate navigation comments on retry.</action>
+  exist, update every title/body and one marker comment per PR with the complete linked graph and
+  ordered table. Verify exact remote state and target-base stability, then mark components ready
+  unless the manifest requests drafts. Do not create duplicate navigation comments on retry.</action>
   <check if="branch publication or PR submission fails after side effects begin">
     Persist the journal and show every branch and PR already created. Ask the user to retry the same
     target, choose another remote and base branch, or stop safely. Never close, delete, or rewrite
@@ -128,7 +130,7 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
 
 <step n="5" goal="Prove the reviewer experience and hand off safely">
   <action>Query every submitted PR and verify: expected repository, exact head SHA, expected base,
-  correct open/draft state, planning link, complete navigation graph, integration branch and immutable
+  exact title/body and final open/draft state, planning link, complete navigation graph, integration branch and immutable
   report links, exact test/build evidence, feature-flag safety statement, and no unexpected cumulative diff.</action>
   <action>For automatic submission, report the planning PR first, then a table of every PR number,
   clickable URL, base/head branch, source SHA, and status. For manual submission, do not invent a PR

@@ -104,7 +104,9 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   common-base navigation, links submitted PR titles in the full stack,
   identifies the series as a stacked PR with a link to `https://www.stacking.dev/`, and adds the
   evidence-backed integration and partial-merge safety section to every PR.
-- Set `draft` when the complete stack should initially avoid normal ready-for-review signaling.
+- New PRs are staged as drafts until every body and graph is finalized and verified. Set `draft: true`
+  to leave the completed stack in draft state; otherwise the script marks every PR ready after its
+  final audit and an exact target-base drift check.
 
 ## Manual submission package
 
@@ -113,7 +115,8 @@ Run the same manifest with `--manual --rendered-dir <directory>` to create numbe
 `SUBMIT.md`. After creating PRs, add their 1-based `position`, `number`, and `url` to
 `manual-links.json`, then rerun with `--manual-links <file>` before creating the next PR. Links must
 form a contiguous prefix; each refresh emits edits for existing PRs and creation instructions only
-for the next layer, while future nodes remain Pending.
+for the next layer as a draft, while future nodes remain Pending. Once every live component link is
+verified, refresh all bodies before using the emitted component readiness commands.
 
 Use `--verbose` during automatic submission to show sanitized `git`/`gh` commands and per-layer
 progress. For enterprise repositories the script ignores `GH_TOKEN` (the GitHub.com token variable)

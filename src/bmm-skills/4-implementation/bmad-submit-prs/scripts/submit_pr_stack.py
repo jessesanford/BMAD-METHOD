@@ -757,7 +757,7 @@ def render_manual_instructions(
         if pr:
             action = "Update existing"
         elif index == len(links):
-            action = f"[Create next]({create_url})"
+            action = f"[Create draft]({create_url})"
         else:
             action = "Blocked"
         lines.append(
@@ -788,7 +788,7 @@ def render_manual_instructions(
                 f'gh pr create --repo "{manifest["repository"]}" '
                 f'--base "{manifest["default_base"]}" '
                 f'--head "{layer["_head_ref"]}" --title "$(cat {position:02d}-title.txt)" '
-                f'--body-file "{position:02d}-body.md"'
+                f'--body-file "{position:02d}-body.md" --draft'
             )
     lines.append("```")
     lines.extend(
@@ -851,7 +851,7 @@ def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str
                 != manifest["_head_owner"].casefold()
             ):
                 raise SubmitError(f"existing PR conflicts for {layer['remote_branch']}")
-            if bool(pr["isDraft"]) != bool(manifest.get("draft")):
+            if manifest.get("draft") and not pr["isDraft"]:
                 raise SubmitError(f"existing PR draft state conflicts for {layer['remote_branch']}")
             if pr["headRefOid"] != layer["_tip"]:
                 raise SubmitError(
@@ -862,6 +862,42 @@ def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str
         if published and published != layer["_tip"] and not existing:
             raise SubmitError(
                 f"refusing to replace unowned fork branch without an open PR: {layer['remote_branch']}"
+            )
+
+
+def validate_manual_links_live(
+    repo: Path,
+    manifest: dict[str, Any],
+    layers: list[dict[str, Any]],
+    links: dict[int, dict[str, Any]],
+) -> None:
+    for index, link in links.items():
+        layer = layers[index]
+        existing = pull_requests_for_head(
+            repo,
+            manifest["repository"],
+            manifest["_head_owner"],
+            layer["remote_branch"],
+        )
+        if len(existing) != 1:
+            raise SubmitError(f"manual link cannot resolve PR for layer {index + 1}")
+        pr = existing[0]
+        if (
+            pr["number"] != link["number"]
+            or pr["url"] != link["url"]
+            or pr["state"] != "OPEN"
+            or pr["baseRefName"] != manifest["default_base"]
+            or pr["headRefOid"] != layer["_tip"]
+            or pr["headRepositoryOwner"].casefold()
+            != manifest["_head_owner"].casefold()
+        ):
+            raise SubmitError(f"manual link conflicts for layer {index + 1}")
+        if manifest.get("draft") and not pr["isDraft"]:
+            raise SubmitError(f"manual PR draft state conflicts for layer {index + 1}")
+        staged = len(links) < len(layers)
+        if staged and not pr["isDraft"]:
+            raise SubmitError(
+                f"manual PR must remain draft until integration linking: layer {index + 1}"
             )
 
 
@@ -918,7 +954,7 @@ def reconcile_created_pull_request(
         or pr["baseRefName"] != expected_base
         or pr["headRefOid"] != layer["_tip"]
         or pr["headRepositoryOwner"].casefold() != manifest["_head_owner"].casefold()
-        or bool(pr["isDraft"]) != bool(manifest.get("draft"))
+        or not pr["isDraft"]
     ):
         raise SubmitError(f"ambiguous PR creation conflicts for {layer['remote_branch']}")
     return pr
@@ -943,9 +979,8 @@ def create_pull_request(
         title,
         "--body-file",
         body_file,
+        "--draft",
     ]
-    if manifest.get("draft"):
-        arguments.append("--draft")
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             url = gh(
@@ -1008,42 +1043,131 @@ def publish(repo: Path, manifest: dict[str, Any], layer: dict[str, Any]) -> None
 def verify_pull_request(
     repo: Path,
     manifest: dict[str, Any],
+    layers: list[dict[str, Any]],
+    links: dict[int, dict[str, Any]],
+    index: int,
     layer: dict[str, Any],
     expected_base: str,
     pr: dict[str, Any],
+    expected_draft: bool | None,
 ) -> None:
-    state = json.loads(
-        gh(
+    _, owner, name = split_repository(manifest["repository"])
+    payload = json.loads(
+        gh_api(
             repo,
             manifest["repository"],
-            "pr",
-            "view",
-            pr["url"],
-            "--json",
-            "state,isDraft,baseRefName,headRefName,headRefOid,body",
+            f"repos/{owner}/{name}/pulls/{pr['number']}",
         )
     )
+    state = {
+        "state": payload["state"].upper(),
+        "isDraft": bool(payload["draft"]),
+        "title": payload["title"],
+        "baseRefName": payload["base"]["ref"],
+        "headRefName": payload["head"]["ref"],
+        "headRefOid": payload["head"]["sha"],
+        "headRepositoryOwner": payload["head"]["repo"]["owner"]["login"],
+        "body": payload.get("body") or "",
+    }
     expected = {
         "state": "OPEN",
-        "isDraft": bool(manifest.get("draft")),
+        "title": stacked_title(layer, index, len(layers), manifest["stack_label"]),
         "baseRefName": expected_base,
         "headRefName": layer["remote_branch"],
         "headRefOid": layer["_tip"],
     }
+    if expected_draft is not None:
+        expected["isDraft"] = expected_draft
     mismatches = [key for key, value in expected.items() if state.get(key) != value]
+    if state["headRepositoryOwner"].casefold() != manifest["_head_owner"].casefold():
+        mismatches.append("headRepositoryOwner")
     if mismatches:
         raise SubmitError(f"submitted PR state mismatch for {layer['remote_branch']}: {', '.join(mismatches)}")
     body = state.get("body") or ""
+    expected_body = render_body(
+        layers,
+        links,
+        index,
+        manifest["default_base"],
+        manifest["feature_summary"],
+        manifest["stack_label"],
+        manifest["integration_evidence"],
+        manifest["_head_owner"],
+        manifest["feature_name"],
+    )
+    if body != expected_body:
+        raise SubmitError(f"submitted PR body drifted for {layer['remote_branch']}")
     evidence = manifest["integration_evidence"]
     required_body_content = (
         MARKER,
+        "> [!WARNING]",
+        "refresh **Files changed**",
+        "https://www.stacking.dev/",
         evidence["_branch_url"],
         evidence["_report_url"],
         evidence["test_command"],
         evidence["partial_merge_safety"]["feature_flag"]["name"],
+        *(link["url"] for link in links.values()),
+        *(
+            [evidence["_integration_pr_url"]]
+            if evidence.get("_integration_pr_url")
+            else []
+        ),
     )
     if any(value not in body for value in required_body_content):
         raise SubmitError(f"submitted PR evidence is incomplete for {layer['remote_branch']}")
+    warning = body.split("\n\n", 1)[0]
+    for prior in range(index):
+        if links[prior]["url"] not in warning:
+            raise SubmitError(
+                f"submitted PR warning omits prerequisite {prior + 1} for {layer['remote_branch']}"
+            )
+
+
+def finalize_draft_state(
+    repo: Path,
+    manifest: dict[str, Any],
+    pr: dict[str, Any],
+) -> None:
+    _, owner, name = split_repository(manifest["repository"])
+    payload = json.loads(
+        gh_api(
+            repo,
+            manifest["repository"],
+            f"repos/{owner}/{name}/pulls/{pr['number']}",
+        )
+    )
+    is_draft = bool(payload["draft"])
+    if manifest.get("draft"):
+        if not is_draft:
+            raise SubmitError(f"PR #{pr['number']} is ready but manifest requires draft")
+        return
+    if not is_draft:
+        return
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            gh(
+                repo,
+                manifest["repository"],
+                "pr",
+                "ready",
+                pr["url"],
+                retry_transient=False,
+            )
+            return
+        except SubmitError as exc:
+            current = json.loads(
+                gh_api(
+                    repo,
+                    manifest["repository"],
+                    f"repos/{owner}/{name}/pulls/{pr['number']}",
+                )
+            )
+            if not current["draft"]:
+                return
+            if not is_transient_failure(str(exc)) or attempt == RETRY_ATTEMPTS:
+                raise
+            retry_delay(attempt, "gh pr ready")
 
 
 def upsert_navigation_comment(
@@ -1057,9 +1181,15 @@ def upsert_navigation_comment(
     if host:
         command.extend(["--hostname", host])
     endpoint = f"repos/{owner}/{name}/issues/{pr['number']}/comments"
-    comments = json.loads(
-        run([*command, f"{endpoint}?per_page=100"], repo, retry_transient=True) or "[]"
+    pages = json.loads(
+        run(
+            [*command, "--paginate", "--slurp", f"{endpoint}?per_page=100"],
+            repo,
+            retry_transient=True,
+        )
+        or "[]"
     )
+    comments = [comment for page in pages for comment in page]
     match = next((item for item in comments if MARKER in (item.get("body") or "")), None)
     if match:
         comment_endpoint = f"repos/{owner}/{name}/issues/comments/{match['id']}"
@@ -1085,14 +1215,20 @@ def upsert_navigation_comment(
             except SubmitError as exc:
                 if not is_transient_failure(str(exc)):
                     raise
-                comments = json.loads(
+                pages = json.loads(
                     run(
-                        [*command, f"{endpoint}?per_page=100"],
+                        [
+                            *command,
+                            "--paginate",
+                            "--slurp",
+                            f"{endpoint}?per_page=100",
+                        ],
                         repo,
                         retry_transient=True,
                     )
                     or "[]"
                 )
+                comments = [comment for page in pages for comment in page]
                 if any(MARKER in (item.get("body") or "") for item in comments):
                     return
                 if attempt == RETRY_ATTEMPTS:
@@ -1117,6 +1253,22 @@ def submit(
         if manual
         else {}
     )
+    if not manual:
+        github_preflight(repo, manifest, layers)
+        links.update(
+            {
+                index: {
+                    "number": layer["_existing_pr"]["number"],
+                    "url": layer["_existing_pr"]["url"],
+                }
+                for index, layer in enumerate(layers)
+                if layer.get("_existing_pr")
+            }
+        )
+    else:
+        github_repository_preflight(repo, manifest)
+        verify_published_layers(repo, manifest, layers)
+        validate_manual_links_live(repo, manifest, layers, links)
     journal: dict[str, Any] = {
         "status": "preflight",
         "repository": manifest["repository"],
@@ -1154,23 +1306,22 @@ def submit(
             ),
             encoding="utf-8",
         )
-        journal["layers"].append(
-            {
-                "branch": layer["branch"],
-                "remote_branch": layer["remote_branch"],
-                "tip": layer["_tip"],
-                "base": manifest["default_base"],
-                "head": layer["_head_ref"],
-                "title": title,
-                "source_title": layer["title"],
-                "rendered_title": str(title_path),
-                "rendered_body": str(body_path),
-            }
-        )
+        journal_layer = {
+            "branch": layer["branch"],
+            "remote_branch": layer["remote_branch"],
+            "tip": layer["_tip"],
+            "base": manifest["default_base"],
+            "head": layer["_head_ref"],
+            "title": title,
+            "source_title": layer["title"],
+            "rendered_title": str(title_path),
+            "rendered_body": str(body_path),
+        }
+        if index in links:
+            journal_layer["pr"] = links[index]
+        journal["layers"].append(journal_layer)
     write_journal(output, journal)
     if manual:
-        github_repository_preflight(repo, manifest)
-        verify_published_layers(repo, manifest, layers)
         links_path = manual_links or destination / "manual-links.json"
         if not links_path.exists():
             links_path.write_text('{\n  "prs": []\n}\n', encoding="utf-8")
@@ -1197,7 +1348,6 @@ def submit(
         journal["status"] = "dry-run"
         write_journal(output, journal)
         return journal
-    github_preflight(repo, manifest, layers)
     for index, layer in enumerate(layers):
         progress("publish", f"{index + 1}/{len(layers)}: {layer['remote_branch']}")
         publish(repo, manifest, layer)
@@ -1210,36 +1360,23 @@ def submit(
             "submit",
             f"{index + 1}/{len(layers)}: {action} {layer['remote_branch']} -> {base}",
         )
-        body = render_body(
-            layers,
-            links,
-            index,
-            manifest["default_base"],
-            manifest["feature_summary"],
-            manifest["stack_label"],
-            manifest["integration_evidence"],
-            manifest["_head_owner"],
-            manifest["feature_name"],
-        )
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
-            handle.write(body)
-            handle.flush()
-            if existing:
-                gh(
-                    repo,
-                    manifest["repository"],
-                    "pr",
-                    "edit",
-                    existing["url"],
-                    "--title",
-                    title,
-                    "--body-file",
-                    handle.name,
-                    "--base",
-                    base,
-                )
-                pr = existing
-            else:
+        if existing:
+            pr = existing
+        else:
+            body = render_body(
+                layers,
+                links,
+                index,
+                manifest["default_base"],
+                manifest["feature_summary"],
+                manifest["stack_label"],
+                manifest["integration_evidence"],
+                manifest["_head_owner"],
+                manifest["feature_name"],
+            )
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
+                handle.write(body)
+                handle.flush()
                 pr = create_pull_request(repo, manifest, layer, base, handle.name, title)
         links[index] = {"number": pr["number"], "url": pr["url"]}
         progress("submit", f"recorded PR #{pr['number']}: {pr['url']}")
@@ -1271,6 +1408,8 @@ def submit(
                 "pr",
                 "edit",
                 links[index]["url"],
+                "--title",
+                stacked_title(layer, index, len(layers), manifest["stack_label"]),
                 "--body-file",
                 handle.name,
             )
@@ -1283,8 +1422,59 @@ def submit(
             manifest["_head_owner"],
         )
         upsert_navigation_comment(repo, manifest, links[index], navigation)
-        expected_base = manifest["default_base"]
-        verify_pull_request(repo, manifest, layer, expected_base, links[index])
+
+    for index, layer in enumerate(layers):
+        title = stacked_title(layer, index, len(layers), manifest["stack_label"])
+        Path(journal["layers"][index]["rendered_title"]).write_text(
+            title + "\n",
+            encoding="utf-8",
+        )
+        Path(journal["layers"][index]["rendered_body"]).write_text(
+            render_body(
+                layers,
+                links,
+                index,
+                manifest["default_base"],
+                manifest["feature_summary"],
+                manifest["stack_label"],
+                manifest["integration_evidence"],
+                manifest["_head_owner"],
+                manifest["feature_name"],
+            ),
+            encoding="utf-8",
+        )
+
+    for index, layer in enumerate(layers):
+        verify_pull_request(
+            repo,
+            manifest,
+            layers,
+            links,
+            index,
+            layer,
+            manifest["default_base"],
+            links[index],
+            None,
+        )
+
+    if remote_sha(repo, manifest["target_remote"], manifest["default_base"]) != manifest["base_sha"]:
+        raise SubmitError("target base branch moved during submission; PRs remain draft")
+
+    for index in range(len(layers)):
+        finalize_draft_state(repo, manifest, links[index])
+
+    for index, layer in enumerate(layers):
+        verify_pull_request(
+            repo,
+            manifest,
+            layers,
+            links,
+            index,
+            layer,
+            manifest["default_base"],
+            links[index],
+            bool(manifest.get("draft")),
+        )
     journal["status"] = "complete"
     write_journal(output, journal)
     return journal
