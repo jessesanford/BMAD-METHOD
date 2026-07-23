@@ -452,6 +452,7 @@ def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str,
     validate_integration_evidence(repo, manifest, layers)
     if manifest["integration_evidence"]["branch"] in targets:
         raise SubmitError("integration evidence branch must differ from component PR branches")
+    manifest["_integration_layer"] = integration_layer(manifest)
     return layers
 
 
@@ -615,6 +616,12 @@ def render_body(
     safety = integration_evidence["partial_merge_safety"]
     feature_flag = safety["feature_flag"]
     builds = ", ".join(f"`{build['artifact']}`" for build in integration_evidence["builds"])
+    combined_pr = (
+        f"\n- [Combined stack validation PR]({integration_evidence['_integration_pr_url']}) "
+        "- **draft only; do not merge**"
+        if integration_evidence.get("_integration_pr_url")
+        else ""
+    )
     validation = (
         "\n\n## Stack validation and partial-merge safety\n\n"
         f"All **{safety['validated_prefixes']}/{safety['total_prefixes']}** cumulative stack prefixes "
@@ -628,6 +635,7 @@ def render_body(
         f"- Tests: `{integration_evidence['test_command']}` - **{tests['passed']} passed, "
         f"{tests['skipped']} skipped, {tests['warnings']} warnings**\n"
         f"- Built distributions: {builds}"
+        f"{combined_pr}"
     )
     return (
         render_merge_warning(
@@ -652,6 +660,91 @@ def render_body(
             head_owner,
         )
     )
+
+
+def integration_title(feature_name: str) -> str:
+    return f"test(stack): validate complete {feature_name} PR stack"
+
+
+def integration_layer(manifest: dict[str, Any]) -> dict[str, Any]:
+    branch = manifest["integration_evidence"]["branch"]
+    return {
+        "remote_branch": branch,
+        "_head_ref": (
+            f"{manifest['_head_owner']}:{branch}"
+            if manifest["_cross_repository"]
+            else branch
+        ),
+        "_tip": manifest["integration_evidence"]["_commit"],
+        "_must_remain_draft": True,
+        "title": integration_title(manifest["feature_name"]),
+    }
+
+
+def render_integration_body(
+    manifest: dict[str, Any],
+    layers: list[dict[str, Any]],
+    links: dict[int, dict[str, Any]],
+) -> str:
+    evidence = manifest["integration_evidence"]
+    tests = evidence["tests"]
+    builds = ", ".join(f"`{build['artifact']}`" for build in evidence["builds"])
+    lines = [
+        "> [!CAUTION]",
+        "> **Combined stack validation PR - DO NOT MERGE**",
+        ">",
+        f"> This draft contains the complete {manifest['feature_name']} PR stack solely so the",
+        "> target repository's GitHub checks can run against the final integrated tree.",
+        "> Review and merge the component PRs below in order; do not approve or merge this PR.",
+        "",
+        "## Purpose",
+        "",
+        "Use the checks on this draft as evidence that the totality of the stack passes the target",
+        "repository's CI when composed. Code review belongs on the component PRs, where each intended",
+        "layer is explained and tracked. This draft is not a substitute merge path.",
+        "",
+        "## Reviewer checklist",
+        "",
+        "- Confirm the GitHub checks below complete successfully against the combined stack.",
+        "- Review each component PR in order and enforce its Stack Merge Gate.",
+        "- Merge only component PRs; keep this combined validation PR in draft and never merge it.",
+        "- If a component changes, require a refreshed integration branch and rerun these checks.",
+        "",
+        "## Component PRs",
+        "",
+        "| # | Component | Head SHA | PR |",
+        "|---:|---|---|---|",
+    ]
+    for index, layer in enumerate(layers):
+        pr = links.get(index)
+        title = stacked_title(layer, index, len(layers), manifest["stack_label"])
+        if pr:
+            title_cell = f"[{title}]({pr['url']})"
+            pr_cell = f"[#{pr['number']}]({pr['url']})"
+        else:
+            title_cell = f"{title} (Pending)"
+            pr_cell = "Pending"
+        lines.append(
+            f"| {index + 1} | {title_cell} | `{layer['_tip']}` | {pr_cell} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Combined-stack evidence",
+            "",
+            f"- Integration head: [`{evidence['_commit']}`]({evidence['_branch_url']})",
+            f"- Immutable validation report: [open report]({evidence['_report_url']})",
+            f"- Local integration command: `{evidence['test_command']}`",
+            f"- Local result: **{tests['passed']} passed, {tests['skipped']} skipped, "
+            f"{tests['warnings']} warnings**",
+            f"- Built distributions: {builds}",
+            "",
+            "The committed report records local integration and prefix validation. The GitHub checks",
+            "on this draft are the authoritative target-repository CI result; this body does not claim",
+            "they pass until GitHub reports them as successful.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def write_journal(path: Path | None, payload: dict[str, Any]) -> None:
@@ -680,39 +773,6 @@ def verify_published_layers(repo: Path, manifest: dict[str, Any], layers: list[d
 def repository_web_url(repository: str) -> str:
     host, owner, name = split_repository(repository)
     return f"https://{host or 'github.com'}/{owner}/{name}"
-
-
-def repository_network_root(repository: dict[str, Any]) -> str:
-    source = repository.get("source")
-    if isinstance(source, dict) and isinstance(source.get("full_name"), str):
-        return source["full_name"].casefold()
-    return repository["full_name"].casefold()
-
-
-def github_repository_preflight(repo: Path, manifest: dict[str, Any]) -> None:
-    host, owner, name = split_repository(manifest["repository"])
-    _, head_owner, head_name = split_repository(manifest["_head_repository"])
-    progress(
-        "preflight",
-        f"checking target {manifest['repository']} and fork heads {manifest['_head_repository']}",
-    )
-    if host:
-        run(["gh", "auth", "status", "--hostname", host], repo, retry_transient=True)
-    target = json.loads(gh_api(repo, manifest["repository"], f"repos/{owner}/{name}"))
-    source = json.loads(
-        gh_api(repo, manifest["repository"], f"repos/{head_owner}/{head_name}")
-    )
-    if not source.get("permissions", {}).get("push"):
-        raise SubmitError("authenticated user lacks push permission for fork head branches")
-    if (
-        manifest["_cross_repository"]
-        and repository_network_root(source) != repository_network_root(target)
-    ):
-        raise SubmitError("publish_remote repository is not in the target repository's fork network")
-
-    target_base = remote_sha(repo, manifest["target_remote"], manifest["default_base"])
-    if target_base != manifest["base_sha"]:
-        raise SubmitError("target base branch moved after manifest creation")
 
 
 def render_manual_instructions(
@@ -790,7 +850,69 @@ def render_manual_instructions(
                 f'--head "{layer["_head_ref"]}" --title "$(cat {position:02d}-title.txt)" '
                 f'--body-file "{position:02d}-body.md" --draft'
             )
-    lines.append("```")
+    lines.extend(
+        [
+            "```",
+            "",
+            "## Create the combined validation PR last",
+            "",
+            "Generated files: `integration-title.txt` and `integration-body.md`.",
+            "",
+        ]
+    )
+    if len(links) == len(layers):
+        existing = manifest.get("_existing_integration_pr")
+        if existing:
+            lines.extend(
+                [
+                    "The exact draft validation PR already exists. Refresh its generated content:",
+                    "",
+                    "```bash",
+                    f'gh pr edit "{existing["url"]}" '
+                    '--title "$(cat integration-title.txt)" '
+                    '--body-file "integration-body.md"',
+                    "```",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "All component links are verified. Create the integration PR as a draft; never",
+                    "mark it ready and never merge it. Then rerun this package so every component",
+                    "body receives the integration-PR link before any component is marked ready:",
+                    "",
+                    "```bash",
+                    f'gh pr create --repo "{manifest["repository"]}" '
+                    f'--base "{manifest["default_base"]}" '
+                    f'--head "{manifest["_integration_layer"]["_head_ref"]}" '
+                    '--title "$(cat integration-title.txt)" '
+                    '--body-file "integration-body.md" --draft',
+                    "```",
+                ]
+            )
+    else:
+        lines.extend(
+            [
+                "Not ready. Record and verify every component PR link, then regenerate this package.",
+                "No integration-PR create command is emitted while any component is Pending.",
+            ]
+        )
+    existing_integration = manifest.get("_existing_integration_pr")
+    if len(links) == len(layers) and existing_integration and not manifest.get("draft"):
+        lines.extend(
+            [
+                "",
+                "## Mark component PRs ready after final refresh",
+                "",
+                "The combined validation PR has been discovered and linked in every generated body.",
+                "After the update commands above succeed, mark each component PR ready; never mark the",
+                "combined validation PR ready:",
+                "",
+                "```bash",
+                *[f'gh pr ready "{links[index]["url"]}"' for index in range(len(layers))],
+                "```",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -823,6 +945,64 @@ def render_manual_instructions(
         ]
     )
     return "\n".join(lines)
+
+
+def repository_network_root(repository: dict[str, Any]) -> str:
+    source = repository.get("source")
+    if isinstance(source, dict) and isinstance(source.get("full_name"), str):
+        return source["full_name"].casefold()
+    return repository["full_name"].casefold()
+
+
+def github_repository_preflight(repo: Path, manifest: dict[str, Any]) -> None:
+    host, owner, name = split_repository(manifest["repository"])
+    _, head_owner, head_name = split_repository(manifest["_head_repository"])
+    progress(
+        "preflight",
+        f"checking target {manifest['repository']} and fork heads {manifest['_head_repository']}",
+    )
+    if host:
+        run(["gh", "auth", "status", "--hostname", host], repo, retry_transient=True)
+    target = json.loads(gh_api(repo, manifest["repository"], f"repos/{owner}/{name}"))
+    source = json.loads(
+        gh_api(repo, manifest["repository"], f"repos/{head_owner}/{head_name}")
+    )
+    if not source.get("permissions", {}).get("push"):
+        raise SubmitError("authenticated user lacks push permission for fork head branches")
+    if (
+        manifest["_cross_repository"]
+        and repository_network_root(source) != repository_network_root(target)
+    ):
+        raise SubmitError("publish_remote repository is not in the target repository's fork network")
+
+    target_base = remote_sha(repo, manifest["target_remote"], manifest["default_base"])
+    if target_base != manifest["base_sha"]:
+        raise SubmitError("target base branch moved after manifest creation")
+
+
+def preflight_integration_pull_request(repo: Path, manifest: dict[str, Any]) -> None:
+    combined = integration_layer(manifest)
+    existing = pull_requests_for_head(
+        repo,
+        manifest["repository"],
+        manifest["_head_owner"],
+        combined["remote_branch"],
+    )
+    if len(existing) > 1:
+        raise SubmitError("multiple combined-stack validation PRs exist")
+    if existing:
+        pr = existing[0]
+        if (
+            pr["state"] != "OPEN"
+            or not pr["isDraft"]
+            or pr["baseRefName"] != manifest["default_base"]
+            or pr["headRefOid"] != combined["_tip"]
+            or pr["headRepositoryOwner"].casefold()
+            != manifest["_head_owner"].casefold()
+        ):
+            raise SubmitError("existing combined-stack validation PR conflicts")
+        manifest["_existing_integration_pr"] = pr
+    manifest["_integration_layer"] = combined
 
 
 def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str, Any]]) -> None:
@@ -863,6 +1043,7 @@ def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str
             raise SubmitError(
                 f"refusing to replace unowned fork branch without an open PR: {layer['remote_branch']}"
             )
+    preflight_integration_pull_request(repo, manifest)
 
 
 def validate_manual_links_live(
@@ -894,7 +1075,7 @@ def validate_manual_links_live(
             raise SubmitError(f"manual link conflicts for layer {index + 1}")
         if manifest.get("draft") and not pr["isDraft"]:
             raise SubmitError(f"manual PR draft state conflicts for layer {index + 1}")
-        staged = len(links) < len(layers)
+        staged = len(links) < len(layers) or not manifest.get("_existing_integration_pr")
         if staged and not pr["isDraft"]:
             raise SubmitError(
                 f"manual PR must remain draft until integration linking: layer {index + 1}"
@@ -1124,6 +1305,60 @@ def verify_pull_request(
             )
 
 
+def verify_integration_pull_request(
+    repo: Path,
+    manifest: dict[str, Any],
+    layers: list[dict[str, Any]],
+    links: dict[int, dict[str, Any]],
+    pr: dict[str, Any],
+) -> None:
+    _, owner, name = split_repository(manifest["repository"])
+    payload = json.loads(
+        gh_api(
+            repo,
+            manifest["repository"],
+            f"repos/{owner}/{name}/pulls/{pr['number']}",
+        )
+    )
+    combined = manifest["_integration_layer"]
+    expected = {
+        "state": "open",
+        "draft": True,
+        "title": combined["title"],
+        "base": manifest["default_base"],
+        "head": combined["remote_branch"],
+        "sha": combined["_tip"],
+        "owner": manifest["_head_owner"].casefold(),
+    }
+    actual = {
+        "state": payload["state"],
+        "draft": bool(payload["draft"]),
+        "title": payload["title"],
+        "base": payload["base"]["ref"],
+        "head": payload["head"]["ref"],
+        "sha": payload["head"]["sha"],
+        "owner": payload["head"]["repo"]["owner"]["login"].casefold(),
+    }
+    mismatches = [field for field, value in expected.items() if actual[field] != value]
+    body = payload.get("body") or ""
+    if body != render_integration_body(manifest, layers, links):
+        mismatches.append("body")
+    required = (
+        "> **Combined stack validation PR - DO NOT MERGE**",
+        "## Component PRs",
+        "## Combined-stack evidence",
+        manifest["integration_evidence"]["_branch_url"],
+        manifest["integration_evidence"]["_report_url"],
+        *(link["url"] for link in links.values()),
+    )
+    if any(value not in body for value in required):
+        mismatches.append("body")
+    if mismatches:
+        raise SubmitError(
+            "combined-stack validation PR mismatch: " + ", ".join(mismatches)
+        )
+
+
 def finalize_draft_state(
     repo: Path,
     manifest: dict[str, Any],
@@ -1255,6 +1490,9 @@ def submit(
     )
     if not manual:
         github_preflight(repo, manifest, layers)
+        existing_integration = manifest.get("_existing_integration_pr")
+        if existing_integration:
+            manifest["integration_evidence"]["_integration_pr_url"] = existing_integration["url"]
         links.update(
             {
                 index: {
@@ -1267,8 +1505,16 @@ def submit(
         )
     else:
         github_repository_preflight(repo, manifest)
+        preflight_integration_pull_request(repo, manifest)
+        if manifest.get("_existing_integration_pr") and len(links) != len(layers):
+            raise SubmitError(
+                "existing combined-stack validation PR requires every manual component link"
+            )
         verify_published_layers(repo, manifest, layers)
         validate_manual_links_live(repo, manifest, layers, links)
+        existing_integration = manifest.get("_existing_integration_pr")
+        if existing_integration:
+            manifest["integration_evidence"]["_integration_pr_url"] = existing_integration["url"]
     journal: dict[str, Any] = {
         "status": "preflight",
         "repository": manifest["repository"],
@@ -1320,6 +1566,25 @@ def submit(
         if index in links:
             journal_layer["pr"] = links[index]
         journal["layers"].append(journal_layer)
+    combined = manifest["_integration_layer"]
+    combined_title_path = destination / "integration-title.txt"
+    combined_body_path = destination / "integration-body.md"
+    combined_title_path.write_text(combined["title"] + "\n", encoding="utf-8")
+    combined_body_path.write_text(
+        render_integration_body(manifest, layers, links),
+        encoding="utf-8",
+    )
+    journal["integration_pr"] = {
+        "branch": combined["remote_branch"],
+        "tip": combined["_tip"],
+        "base": manifest["default_base"],
+        "head": combined["_head_ref"],
+        "title": combined["title"],
+        "rendered_title": str(combined_title_path),
+        "rendered_body": str(combined_body_path),
+        "draft": True,
+        "merge": "prohibited",
+    }
     write_journal(output, journal)
     if manual:
         links_path = manual_links or destination / "manual-links.json"
@@ -1383,6 +1648,45 @@ def submit(
         journal["layers"][index]["pr"] = links[index]
         journal["status"] = "submitting"
         write_journal(output, journal)
+
+    combined = manifest["_integration_layer"]
+    combined_body = render_integration_body(manifest, layers, links)
+    existing_combined = manifest.get("_existing_integration_pr")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as handle:
+        handle.write(combined_body)
+        handle.flush()
+        if existing_combined:
+            gh(
+                repo,
+                manifest["repository"],
+                "pr",
+                "edit",
+                existing_combined["url"],
+                "--title",
+                combined["title"],
+                "--body-file",
+                handle.name,
+                "--base",
+                manifest["default_base"],
+            )
+            integration_pr = existing_combined
+        else:
+            integration_pr = create_pull_request(
+                repo,
+                manifest,
+                combined,
+                manifest["default_base"],
+                handle.name,
+                combined["title"],
+            )
+    manifest["integration_evidence"]["_integration_pr_url"] = integration_pr["url"]
+    journal["integration_pr"]["pr"] = {
+        "number": integration_pr["number"],
+        "url": integration_pr["url"],
+    }
+    journal["status"] = "submitting"
+    write_journal(output, journal)
+
     for index, layer in enumerate(layers):
         progress(
             "finalize",
@@ -1443,6 +1747,14 @@ def submit(
             ),
             encoding="utf-8",
         )
+    Path(journal["integration_pr"]["rendered_title"]).write_text(
+        combined["title"] + "\n",
+        encoding="utf-8",
+    )
+    Path(journal["integration_pr"]["rendered_body"]).write_text(
+        render_integration_body(manifest, layers, links),
+        encoding="utf-8",
+    )
 
     for index, layer in enumerate(layers):
         verify_pull_request(
@@ -1456,6 +1768,13 @@ def submit(
             links[index],
             None,
         )
+    verify_integration_pull_request(
+        repo,
+        manifest,
+        layers,
+        links,
+        integration_pr,
+    )
 
     if remote_sha(repo, manifest["target_remote"], manifest["default_base"]) != manifest["base_sha"]:
         raise SubmitError("target base branch moved during submission; PRs remain draft")
@@ -1475,6 +1794,13 @@ def submit(
             links[index],
             bool(manifest.get("draft")),
         )
+    verify_integration_pull_request(
+        repo,
+        manifest,
+        layers,
+        links,
+        integration_pr,
+    )
     journal["status"] = "complete"
     write_journal(output, journal)
     return journal
@@ -1514,4 +1840,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
