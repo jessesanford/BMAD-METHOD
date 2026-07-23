@@ -17,6 +17,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlparse
 
 
 class BuildError(RuntimeError):
@@ -67,7 +68,31 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 
 def validate(repo: Path, manifest: dict[str, Any]) -> tuple[str, list[dict[str, Any]], list[str]]:
+    for field in ("base", "base_remote", "base_branch", "source_remote", "remote"):
+        if not isinstance(manifest.get(field), str) or not manifest[field]:
+            raise BuildError(f"manifest missing {field}")
+    base_remote = manifest["base_remote"]
+    source_remote = manifest["source_remote"]
+    publish_remote = manifest["remote"]
+    base_identity = validate_remote_push_urls(repo, base_remote)
+    source_identity = validate_remote_push_urls(repo, source_remote)
+    publish_identity = validate_remote_push_urls(repo, publish_remote)
+    if base_identity != publish_identity:
+        raise BuildError("base_remote and remote must resolve to the canonical target repository")
+    fork_release = source_identity != publish_identity
+    if fork_release and (
+        base_remote != "upstream"
+        or publish_remote != "upstream"
+        or source_remote != "origin"
+    ):
+        raise BuildError(
+            "fork releases require base_remote/remote upstream and source_remote origin"
+        )
+    manifest["_fork_release"] = fork_release
     base = resolve(repo, str(manifest.get("base", "")))
+    canonical_base = remote_ref(repo, base_remote, manifest["base_branch"])
+    if canonical_base != base:
+        raise BuildError("base must equal the exact canonical remote default-branch SHA")
     excludes = manifest.get("exclude_paths", [])
     if not isinstance(excludes, list) or not all(isinstance(item, str) and item for item in excludes):
         raise BuildError("exclude_paths must be non-empty strings")
@@ -81,11 +106,24 @@ def validate(repo: Path, manifest: dict[str, Any]) -> tuple[str, list[dict[str, 
         layer["_parent"] = resolve(repo, layer["source_parent"])
         if resolve(repo, layer["source"]) != layer["_tip"]:
             raise BuildError(f"source ref drifted: {layer['source']}")
+        if remote_ref(repo, source_remote, layer["source"]) != layer["_tip"]:
+            raise BuildError(
+                f"source ref {layer['source']} must be published on "
+                f"{source_remote} at source_tip"
+            )
+        if fork_release and remote_ref(repo, publish_remote, layer["source"]) is not None:
+            raise BuildError(
+                f"source ref {layer['source']} must not be published on {publish_remote}"
+            )
         if not is_ancestor(repo, layer["_parent"], layer["_tip"]):
             raise BuildError(f"source parent is not an ancestor: {layer['source']}")
         target = layer["target"]
         if not target.endswith("-pr-ready") or target == layer["source"] or target in targets:
             raise BuildError(f"invalid or duplicate target: {target}")
+        if fork_release and remote_ref(repo, source_remote, target) is not None:
+            raise BuildError(
+                f"PR-ready target {target} must not be published on {source_remote}"
+            )
         targets.add(target)
         cursor = layer["_parent"]
         for group in layer["groups"]:
@@ -145,6 +183,84 @@ def remote_ref(repo: Path, remote: str, branch: str) -> str | None:
     return output.split()[0] if output else None
 
 
+def remote_identity(repo: Path, value: str) -> tuple[str, ...]:
+    if value.startswith("git@"):
+        match = re.fullmatch(r"git@([^:]+):([^/]+)/(.+)", value)
+        if not match:
+            raise BuildError(f"cannot parse remote URL: {value}")
+        return (
+            "network",
+            match.group(1).casefold(),
+            match.group(2).casefold(),
+            match.group(3).removesuffix(".git").casefold(),
+        )
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.scheme != "file":
+        parts = parsed.path.strip("/").removesuffix(".git").split("/")
+        if not parsed.hostname or len(parts) != 2:
+            raise BuildError(f"cannot parse remote URL: {value}")
+        return ("network", parsed.hostname.casefold(), *(part.casefold() for part in parts))
+    path = Path(parsed.path if parsed.scheme == "file" else value)
+    if not path.is_absolute():
+        path = repo / path
+    return ("file", str(path.resolve()))
+
+
+def validate_remote_push_urls(repo: Path, remote: str) -> tuple[str, ...]:
+    fetch_urls = git_text(repo, "remote", "get-url", "--all", remote).splitlines()
+    push_urls = git_text(repo, "remote", "get-url", "--push", "--all", remote).splitlines()
+    if not fetch_urls or not push_urls:
+        raise BuildError(f"remote {remote} must have fetch and push URLs")
+    canonical = remote_identity(repo, fetch_urls[0])
+    if any(remote_identity(repo, value) != canonical for value in (*fetch_urls, *push_urls)):
+        raise BuildError(
+            f"all effective {remote} fetch and push URLs must resolve to one repository"
+        )
+    return canonical
+
+
+def pull_requests_for_head(
+    repo: Path,
+    remote_identity_value: tuple[str, ...],
+    branch: str,
+) -> list[dict[str, Any]]:
+    if remote_identity_value[0] != "network":
+        raise BuildError(
+            f"cannot verify whether existing target branch {branch} is used by a pull request"
+        )
+    _, host, owner, name = remote_identity_value
+    endpoint = (
+        f"repos/{owner}/{name}/pulls?state=all&head="
+        f"{quote(f'{owner}:{branch}', safe='')}&per_page=100"
+    )
+    command = ["gh", "api"]
+    if host != "github.com":
+        command.extend(["--hostname", host])
+    command.extend(["--paginate", "--slurp", endpoint])
+    result = subprocess.run(command, cwd=repo, text=True, capture_output=True)
+    if result.returncode:
+        raise BuildError(
+            result.stderr.strip()
+            or f"cannot inspect pull requests using existing target branch {branch}"
+        )
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise BuildError(f"cannot parse pull requests for {branch}: {exc}") from exc
+    items = (
+        [item for page in payload for item in page]
+        if payload and isinstance(payload[0], list)
+        else payload
+    )
+    return [
+        item
+        for item in items
+        if item.get("head", {}).get("ref") == branch
+        and item.get("head", {}).get("repo", {}).get("owner", {}).get("login", "").casefold()
+        == owner
+    ]
+
+
 def safe(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._/-]+", "-", value).strip("/")
 
@@ -165,11 +281,11 @@ def commit_environment(repo: Path, revision: str) -> dict[str, str]:
 
 def build(repo: Path, manifest_path: Path, apply: bool, push: bool) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
-    base, layers, excludes = validate(repo, manifest)
     if push and not apply:
         raise BuildError("--push requires --apply")
     if git_text(repo, "status", "--porcelain"):
         raise BuildError("worktree must be clean")
+    base, layers, excludes = validate(repo, manifest)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     parent_tip = base
     built = []
@@ -215,6 +331,10 @@ def build(repo: Path, manifest_path: Path, apply: bool, push: bool) -> dict[str,
                 raise BuildError(f"{layer['target']} contains excluded paths: {banned}")
             if not is_ancestor(repo, parent_tip, tip):
                 raise BuildError(f"{layer['target']} is not based on its prior PR-ready layer")
+            if tip == parent_tip:
+                raise BuildError(
+                    f"{layer['target']} is an empty component layer: adjacent layers resolve to the same commit"
+                )
             built.append(
                 {
                     "source": layer["source"],
@@ -228,6 +348,28 @@ def build(repo: Path, manifest_path: Path, apply: bool, push: bool) -> dict[str,
                 }
             )
             parent_tip = tip
+    remote = manifest["remote"]
+    if push:
+        remote_identity_value = validate_remote_push_urls(repo, remote)
+        for layer in built:
+            if remote_ref(repo, "origin", layer["target"]) is not None:
+                raise BuildError(
+                    f"PR-ready target {layer['target']} appeared on origin before publication"
+                )
+            old_remote = remote_ref(repo, remote, layer["target"])
+            layer["old_remote"] = old_remote
+            if old_remote and old_remote != layer["new_tip"]:
+                pulls = pull_requests_for_head(repo, remote_identity_value, layer["target"])
+                suffix = (
+                    "; PR(s) " + ", ".join(f"#{item.get('number', '?')}" for item in pulls)
+                    + " use this head"
+                    if pulls
+                    else ""
+                )
+                raise BuildError(
+                    f"refusing to replace divergent remote branch {layer['target']}{suffix}; "
+                    "backup refs are prohibited on the PR-ready publication remote"
+                )
     if apply:
         for layer in built:
             if layer["old_local"]:
@@ -235,18 +377,38 @@ def build(repo: Path, manifest_path: Path, apply: bool, push: bool) -> dict[str,
                 run_git(repo, "update-ref", backup, layer["old_local"])
                 layer["local_backup"] = backup
             run_git(repo, "update-ref", f"refs/heads/{layer['target']}", layer["new_tip"])
-    remote = str(manifest.get("remote", "origin"))
     if push:
         for layer in built:
-            old_remote = remote_ref(repo, remote, layer["target"])
-            layer["old_remote"] = old_remote
-            if old_remote:
-                backup = f"backup/pr-ready/{run_id}/{safe(layer['target'])}"
-                run_git(repo, "push", remote, f"{old_remote}:refs/heads/{backup}")
-                layer["remote_backup"] = backup
+            old_remote = layer["old_remote"]
             lease = f"--force-with-lease=refs/heads/{layer['target']}:{old_remote or ''}"
             run_git(repo, "push", lease, remote, f"{layer['new_tip']}:refs/heads/{layer['target']}")
+            if remote_ref(repo, remote, layer["target"]) != layer["new_tip"]:
+                raise BuildError(f"published branch SHA mismatch: {layer['target']}")
             layer["pushed"] = True
+        misplaced = [
+            layer["target"]
+            for layer in built
+            if remote_ref(repo, "origin", layer["target"]) is not None
+        ]
+        if misplaced:
+            raise BuildError(
+                "PR-ready target appeared on origin during publication: "
+                + ", ".join(misplaced)
+            )
+        if manifest["_fork_release"]:
+            source_remote = manifest["source_remote"]
+            for source, built_layer in zip(layers, built, strict=True):
+                if remote_ref(repo, source_remote, source["source"]) != source["_tip"]:
+                    raise BuildError(f"source branch moved on {source_remote}: {source['source']}")
+                if remote_ref(repo, remote, source["source"]) is not None:
+                    raise BuildError(
+                        f"source ref appeared on {remote} during publication: {source['source']}"
+                    )
+                if remote_ref(repo, source_remote, built_layer["target"]) is not None:
+                    raise BuildError(
+                        f"PR-ready target appeared on {source_remote} during publication: "
+                        f"{built_layer['target']}"
+                    )
     return {
         "status": "applied" if apply else "dry-run",
         "run_id": run_id,
