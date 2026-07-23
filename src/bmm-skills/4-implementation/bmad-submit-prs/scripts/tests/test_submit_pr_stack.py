@@ -70,6 +70,7 @@ class SubmitterTests(unittest.TestCase):
             0,
             "main",
             "feature-x",
+            "contributor",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn(
@@ -79,7 +80,8 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
         self.assertIn("Pending", rendered)
         self.assertIn("L1 --> L2", rendered)
-        self.assertIn("| `main` |", rendered)
+        self.assertEqual(rendered.count("| `main` |"), 2)
+        self.assertIn("| [#41](https://example.test/pull/41) | `main` |", rendered)
 
     def test_complete_navigation_links_every_pr(self) -> None:
         rendered = MODULE.render_navigation(
@@ -91,12 +93,46 @@ class SubmitterTests(unittest.TestCase):
             1,
             "release",
             "feature-x",
+            "contributor",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn("[#42](https://example.test/pull/42)", rendered)
         self.assertNotIn("| Pending |", rendered)
         self.assertIn("**This PR:** 2 of 2", rendered)
-        self.assertIn("| `release` |", rendered)
+        self.assertEqual(rendered.count("| `release` |"), 2)
+        self.assertNotIn("`stack/plan-pr-ready` |", rendered)
+
+
+    def test_merge_gate_uses_feature_name_and_explicit_prerequisites(self) -> None:
+        first = MODULE.render_merge_warning(
+            self.layers,
+            {},
+            0,
+            "main",
+            "feature-x",
+            "Arize AX",
+        )
+        self.assertIn("**Stack Merge Gate (1/2)**", first)
+        self.assertIn(
+            "This is the first PR in a series of PRs composing a PR stack for the Arize AX feature.",
+            first,
+        )
+        self.assertIn("This is the planning PR.", first)
+        self.assertIn("Do not approve or merge any PR out of order", first)
+        self.assertIn("See the **Stack PR Navigation** section below.", first)
+        self.assertNotIn("simulated", first.casefold())
+        self.assertNotIn("#stack-navigation", first)
+
+        second = MODULE.render_merge_warning(
+            self.layers,
+            {0: {"number": 41, "url": "https://example.test/pull/41"}},
+            1,
+            "main",
+            "feature-x",
+            "Arize AX",
+        )
+        self.assertIn("[#41 - docs(stacked-pr: feature-x [1/2])", second)
+        self.assertIn("DO NOT APPROVE until every PR below is merged", second)
 
     def test_enterprise_environment_ignores_github_token(self) -> None:
         original = MODULE.COMMAND_ENV
@@ -125,7 +161,12 @@ class SubmitterTests(unittest.TestCase):
                 "Adds opt-in tracing across the migration-agent fleet.",
                 "feature-x",
                 self.evidence,
+                "contributor",
+                "Feature X",
             )
+        self.assertTrue(rendered.startswith("> [!WARNING]\n> **Stack Merge Gate (2/2)**"))
+        self.assertIn("PR stack for the Feature X feature", rendered)
+        self.assertIn("#41 - docs(stacked-pr: feature-x [1/2])", rendered)
         self.assertIn("Adds opt-in tracing across the migration-agent fleet.", rendered)
         self.assertIn("[Planning PR #41](https://example.test/pull/41)", rendered)
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
@@ -387,6 +428,7 @@ class SubmitterTests(unittest.TestCase):
                     "repository": "github.example.com/owner/repo",
                     "default_base": "main",
                     "_head_repository": "github.example.com/contributor/repo",
+                    "_head_owner": "contributor",
                     "feature_summary": "Adds focused behavior.",
                     "stack_label": "feature-x",
                 },
@@ -402,9 +444,14 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("stack/story-pr-ready", rendered)
         self.assertIn("[#41](https://github.example.com/owner/repo/pull/41)", rendered)
         self.assertIn("Pending", rendered)
-        self.assertEqual(rendered.count('--base "main"'), 2)
+        self.assertEqual(rendered.count('--base "main"'), 1)
         self.assertNotIn('--base "stack/plan-pr-ready"', rendered)
         self.assertIn('--head "contributor:stack/story-pr-ready"', rendered)
+        self.assertIn('--body-file "02-body.md"', rendered)
+        self.assertNotIn('gh pr create --repo "github.example.com/owner/repo" --base "main" '
+                         '--head "contributor:stack/plan-pr-ready"', rendered)
+        self.assertIn('Create next', rendered)
+        self.assertIn('gh pr edit "https://github.example.com/owner/repo/pull/41"', rendered)
 
     def test_manual_links_use_one_based_positions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -414,21 +461,45 @@ class SubmitterTests(unittest.TestCase):
                     {
                         "prs": [
                             {
-                                "position": 2,
-                                "number": 42,
-                                "url": "https://example.test/pull/42",
+                                "position": 1,
+                                "number": 41,
+                                "url": "https://example.test/owner/repo/pull/41",
                             }
                         ]
                     }
                 ),
                 encoding="utf-8",
             )
-            links = MODULE.load_manual_links(path, 2)
-        self.assertEqual(links, {1: {"number": 42, "url": "https://example.test/pull/42"}})
+            links = MODULE.load_manual_links(path, 2, "example.test/owner/repo")
+        self.assertEqual(
+            links,
+            {0: {"number": 41, "url": "https://example.test/owner/repo/pull/41"}},
+        )
         self.assertEqual(
             MODULE.parse_remote("https://github.example.com/owner/repo.git"),
             ("github.example.com", "owner", "repo"),
         )
+
+
+    def test_manual_links_reject_gapped_prerequisites(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "links.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "prs": [
+                            {
+                                "position": 2,
+                                "number": 42,
+                                "url": "https://example.test/owner/repo/pull/42",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(MODULE.SubmitError, "contiguous prefix"):
+                MODULE.load_manual_links(path, 2, "example.test/owner/repo")
 
 
 if __name__ == "__main__":
