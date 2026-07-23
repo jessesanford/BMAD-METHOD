@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,10 +38,14 @@ class SubmitterTests(unittest.TestCase):
             self.layers,
             {0: {"number": 41, "url": "https://example.test/pull/41"}},
             0,
+            "main",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
+        self.assertIn("[docs: plan feature](https://example.test/pull/41)", rendered)
+        self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
         self.assertIn("Pending", rendered)
         self.assertIn("L1 --> L2", rendered)
+        self.assertIn("| `main` |", rendered)
 
     def test_complete_navigation_links_every_pr(self) -> None:
         rendered = MODULE.render_navigation(
@@ -49,17 +55,77 @@ class SubmitterTests(unittest.TestCase):
                 1: {"number": 42, "url": "https://example.test/pull/42"},
             },
             1,
+            "release",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn("[#42](https://example.test/pull/42)", rendered)
         self.assertNotIn("| Pending |", rendered)
         self.assertIn("**This PR:** 2 of 2", rendered)
+        self.assertIn("| `release` |", rendered)
+
+    def test_implementation_body_links_feature_plan_with_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [dict(layer, _body_file=body_file) for layer in self.layers]
+            rendered = MODULE.render_body(
+                layers,
+                {0: {"number": 41, "url": "https://example.test/pull/41"}},
+                1,
+                "main",
+                "Adds opt-in tracing across the migration-agent fleet.",
+            )
+        self.assertIn("Adds opt-in tracing across the migration-agent fleet.", rendered)
+        self.assertIn("[Planning PR #41](https://example.test/pull/41)", rendered)
+        self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
 
     def test_remote_url_parsing_supports_ssh_and_https(self) -> None:
         self.assertEqual(
             MODULE.parse_remote("git@github.example.com:owner/repo.git"),
             ("github.example.com", "owner", "repo"),
         )
+
+    def test_manual_instructions_include_order_files_and_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            rendered = MODULE.render_manual_instructions(
+                {
+                    "repository": "github.example.com/owner/repo",
+                    "default_base": "main",
+                    "feature_summary": "Adds focused behavior.",
+                },
+                self.layers,
+                {0: {"number": 41, "url": "https://github.example.com/owner/repo/pull/41"}},
+                directory / "manifest.json",
+                directory,
+                directory / "manual-links.json",
+                directory / "journal.json",
+            )
+        self.assertIn("01-title.txt", rendered)
+        self.assertIn("02-body.md", rendered)
+        self.assertIn("stack/story-pr-ready", rendered)
+        self.assertIn("[#41](https://github.example.com/owner/repo/pull/41)", rendered)
+        self.assertIn("Pending", rendered)
+
+    def test_manual_links_use_one_based_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "links.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "prs": [
+                            {
+                                "position": 2,
+                                "number": 42,
+                                "url": "https://example.test/pull/42",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            links = MODULE.load_manual_links(path, 2)
+        self.assertEqual(links, {1: {"number": 42, "url": "https://example.test/pull/42"}})
         self.assertEqual(
             MODULE.parse_remote("https://github.example.com/owner/repo.git"),
             ("github.example.com", "owner", "repo"),
