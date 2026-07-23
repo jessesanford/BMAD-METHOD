@@ -40,9 +40,13 @@ class SubmitterTests(unittest.TestCase):
             {0: {"number": 41, "url": "https://example.test/pull/41"}},
             0,
             "main",
+            "feature-x",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
-        self.assertIn("[docs: plan feature](https://example.test/pull/41)", rendered)
+        self.assertIn(
+            "[docs(stacked-pr: feature-x [1/2]): plan feature](https://example.test/pull/41)",
+            rendered,
+        )
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
         self.assertIn("Pending", rendered)
         self.assertIn("L1 --> L2", rendered)
@@ -57,6 +61,7 @@ class SubmitterTests(unittest.TestCase):
             },
             1,
             "release",
+            "feature-x",
         )
         self.assertIn("[#41](https://example.test/pull/41)", rendered)
         self.assertIn("[#42](https://example.test/pull/42)", rendered)
@@ -89,10 +94,22 @@ class SubmitterTests(unittest.TestCase):
                 1,
                 "main",
                 "Adds opt-in tracing across the migration-agent fleet.",
+                "feature-x",
             )
         self.assertIn("Adds opt-in tracing across the migration-agent fleet.", rendered)
         self.assertIn("[Planning PR #41](https://example.test/pull/41)", rendered)
         self.assertIn("[stacked pull request](https://www.stacking.dev/)", rendered)
+
+    def test_stacked_title_inserts_position_after_conventional_prefix(self) -> None:
+        self.assertEqual(
+            MODULE.stacked_title(
+                {"title": "feat(observability): add tracing"},
+                0,
+                16,
+                "arize-ax",
+            ),
+            "feat(observability)(stacked-pr: arize-ax [1/16]): add tracing",
+        )
 
     def test_remote_url_parsing_supports_ssh_and_https(self) -> None:
         self.assertEqual(
@@ -200,6 +217,7 @@ class SubmitterTests(unittest.TestCase):
             {"remote_branch": "stack/story-pr-ready", "title": "feat: story"},
             "stack/plan-pr-ready",
             "/tmp/body.md",
+            "feat(stacked-pr: feature-x [2/2]): story",
         )
 
         self.assertEqual(pr["number"], 41)
@@ -214,6 +232,7 @@ class SubmitterTests(unittest.TestCase):
                     "repository": "github.example.com/owner/repo",
                     "default_base": "main",
                     "feature_summary": "Adds focused behavior.",
+                    "stack_label": "feature-x",
                 },
                 self.layers,
                 {0: {"number": 41, "url": "https://github.example.com/owner/repo/pull/41"}},
