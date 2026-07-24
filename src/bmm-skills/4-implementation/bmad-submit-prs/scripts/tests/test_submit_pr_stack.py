@@ -26,11 +26,13 @@ class SubmitterTests(unittest.TestCase):
                 "title": "docs: plan feature",
                 "summary": "Feature plan.",
                 "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "contributor:stack/plan-pr-ready",
             },
             {
                 "title": "feat: implement feature",
                 "summary": "Implementation.",
                 "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "contributor:stack/story-pr-ready",
             },
         ]
         self.evidence = {
@@ -146,6 +148,7 @@ class SubmitterTests(unittest.TestCase):
         manifest = {
             "repository": "example.test/owner/repo",
             "publish_remote": "origin",
+            "_head_repository": "example.test/contributor/repo",
             "integration_evidence": {
                 key: value for key, value in self.evidence.items() if not key.startswith("_")
             },
@@ -234,6 +237,35 @@ class SubmitterTests(unittest.TestCase):
         self.assertTrue(
             MODULE.is_transient_failure('Post "https://api.github.example/graphql": EOF')
         )
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_head_lookup_is_scoped_to_fork_owner(self, api_mock: mock.Mock) -> None:
+        api_mock.return_value = json.dumps(
+            [
+                {
+                    "number": 41,
+                    "html_url": "https://example.test/owner/repo/pull/41",
+                    "state": "open",
+                    "draft": False,
+                    "base": {"ref": "main"},
+                    "head": {
+                        "ref": "stack/story-pr-ready",
+                        "sha": "a" * 40,
+                        "repo": {"owner": {"login": "contributor"}},
+                    },
+                }
+            ]
+        )
+
+        pulls = MODULE.pull_requests_for_head(
+            Path.cwd(),
+            "example.test/owner/repo",
+            "contributor",
+            "stack/story-pr-ready",
+        )
+
+        self.assertEqual(pulls[0]["headRepositoryOwner"], "contributor")
+        self.assertIn("head=contributor:stack%2Fstory-pr-ready", api_mock.call_args.args[2])
 
     @mock.patch.object(MODULE.time, "sleep")
     @mock.patch.object(MODULE.subprocess, "run")
@@ -328,9 +360,17 @@ class SubmitterTests(unittest.TestCase):
 
         pr = MODULE.create_pull_request(
             Path.cwd(),
-            {"repository": "example.test/owner/repo", "draft": False},
-            {"remote_branch": "stack/story-pr-ready", "title": "feat: story"},
-            "stack/plan-pr-ready",
+            {
+                "repository": "example.test/owner/repo",
+                "draft": False,
+                "_head_owner": "contributor",
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "contributor:stack/story-pr-ready",
+                "title": "feat: story",
+            },
+            "main",
             "/tmp/body.md",
             "feat(stacked-pr: feature-x [2/2]): story",
         )
@@ -346,6 +386,7 @@ class SubmitterTests(unittest.TestCase):
                 {
                     "repository": "github.example.com/owner/repo",
                     "default_base": "main",
+                    "_head_repository": "github.example.com/contributor/repo",
                     "feature_summary": "Adds focused behavior.",
                     "stack_label": "feature-x",
                 },
@@ -361,6 +402,9 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("stack/story-pr-ready", rendered)
         self.assertIn("[#41](https://github.example.com/owner/repo/pull/41)", rendered)
         self.assertIn("Pending", rendered)
+        self.assertEqual(rendered.count('--base "main"'), 2)
+        self.assertNotIn('--base "stack/plan-pr-ready"', rendered)
+        self.assertIn('--head "contributor:stack/story-pr-ready"', rendered)
 
     def test_manual_links_use_one_based_positions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
