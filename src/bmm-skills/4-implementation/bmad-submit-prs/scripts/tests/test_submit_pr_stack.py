@@ -10,6 +10,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[1] / "submit_pr_stack.py"
 SPEC = importlib.util.spec_from_file_location("submitter", SCRIPT)
@@ -63,6 +64,20 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("**This PR:** 2 of 2", rendered)
         self.assertIn("| `release` |", rendered)
 
+    def test_enterprise_environment_ignores_github_token(self) -> None:
+        original = MODULE.COMMAND_ENV
+        self.addCleanup(setattr, MODULE, "COMMAND_ENV", original)
+        with mock.patch.dict(MODULE.os.environ, {"GH_TOKEN": "github-token"}):
+            MODULE.configure_command_environment("github.example.com/owner/repo")
+        self.assertNotIn("GH_TOKEN", MODULE.COMMAND_ENV)
+
+    def test_command_display_redacts_inline_bodies(self) -> None:
+        rendered = MODULE.display_command(
+            ["gh", "api", "-f", "body=secret", "pr", "comment", "--body", "also-secret"]
+        )
+        self.assertNotIn("secret", rendered)
+        self.assertIn("body=<redacted>", rendered)
+
     def test_implementation_body_links_feature_plan_with_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             body_file = Path(temporary) / "body.md"
@@ -84,6 +99,112 @@ class SubmitterTests(unittest.TestCase):
             MODULE.parse_remote("git@github.example.com:owner/repo.git"),
             ("github.example.com", "owner", "repo"),
         )
+        self.assertTrue(
+            MODULE.is_transient_failure('Post "https://api.github.example/graphql": EOF')
+        )
+
+    @mock.patch.object(MODULE.time, "sleep")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_transient_commands_retry_with_backoff(
+        self,
+        run_mock: mock.Mock,
+        sleep_mock: mock.Mock,
+    ) -> None:
+        run_mock.side_effect = [
+            MODULE.subprocess.CompletedProcess([], 1, "", "Failed to connect to host"),
+            MODULE.subprocess.CompletedProcess([], 0, "reachable\n", ""),
+        ]
+
+        result = MODULE.run(["gh", "api", "rate_limit"], Path.cwd(), retry_transient=True)
+
+        self.assertEqual(result, "reachable")
+        self.assertEqual(run_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(2)
+
+    @mock.patch.object(MODULE.time, "sleep")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_non_transient_commands_fail_without_retry(
+        self,
+        run_mock: mock.Mock,
+        sleep_mock: mock.Mock,
+    ) -> None:
+        run_mock.return_value = MODULE.subprocess.CompletedProcess([], 1, "", "HTTP 403: Forbidden")
+
+        with self.assertRaisesRegex(MODULE.SubmitError, "403"):
+            MODULE.run(["gh", "api", "repo"], Path.cwd(), retry_transient=True)
+
+        run_mock.assert_called_once()
+        sleep_mock.assert_not_called()
+
+    @mock.patch.object(MODULE, "retry_delay")
+    @mock.patch.object(MODULE, "git")
+    @mock.patch.object(MODULE, "remote_sha")
+    def test_publish_retries_when_lease_is_unchanged(
+        self,
+        remote_sha_mock: mock.Mock,
+        git_mock: mock.Mock,
+        retry_delay_mock: mock.Mock,
+    ) -> None:
+        remote_sha_mock.side_effect = ["old-tip", "old-tip", "new-tip"]
+        git_mock.side_effect = [MODULE.SubmitError("Failed to connect"), ""]
+
+        MODULE.publish(
+            Path.cwd(),
+            {"publish_remote": "origin"},
+            {"remote_branch": "stack/story-pr-ready", "_tip": "new-tip"},
+        )
+
+        self.assertEqual(git_mock.call_count, 2)
+        retry_delay_mock.assert_called_once_with(1, "git push")
+
+    @mock.patch.object(MODULE, "retry_delay")
+    @mock.patch.object(MODULE, "git")
+    @mock.patch.object(MODULE, "remote_sha")
+    def test_publish_refuses_retry_after_remote_race(
+        self,
+        remote_sha_mock: mock.Mock,
+        git_mock: mock.Mock,
+        retry_delay_mock: mock.Mock,
+    ) -> None:
+        remote_sha_mock.side_effect = ["old-tip", "someone-elses-tip"]
+        git_mock.side_effect = MODULE.SubmitError("Failed to connect")
+
+        with self.assertRaisesRegex(MODULE.SubmitError, "remote branch changed"):
+            MODULE.publish(
+                Path.cwd(),
+                {"publish_remote": "origin"},
+                {"remote_branch": "stack/story-pr-ready", "_tip": "new-tip"},
+            )
+
+        retry_delay_mock.assert_not_called()
+
+    @mock.patch.object(MODULE, "retry_delay")
+    @mock.patch.object(MODULE, "reconcile_created_pull_request")
+    @mock.patch.object(MODULE, "gh")
+    def test_create_reconciles_ambiguous_transport_failure(
+        self,
+        gh_mock: mock.Mock,
+        reconcile_mock: mock.Mock,
+        retry_delay_mock: mock.Mock,
+    ) -> None:
+        gh_mock.side_effect = MODULE.SubmitError('Post "https://api.example/graphql": EOF')
+        reconcile_mock.return_value = {
+            "number": 41,
+            "url": "https://example.test/pull/41",
+            "state": "OPEN",
+        }
+
+        pr = MODULE.create_pull_request(
+            Path.cwd(),
+            {"repository": "example.test/owner/repo", "draft": False},
+            {"remote_branch": "stack/story-pr-ready", "title": "feat: story"},
+            "stack/plan-pr-ready",
+            "/tmp/body.md",
+        )
+
+        self.assertEqual(pr["number"], 41)
+        reconcile_mock.assert_called_once()
+        retry_delay_mock.assert_not_called()
 
     def test_manual_instructions_include_order_files_and_graph(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

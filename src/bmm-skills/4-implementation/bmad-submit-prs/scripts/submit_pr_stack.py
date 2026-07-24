@@ -8,34 +8,140 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
 MARKER = "<!-- bmad-stack-navigation:v1 -->"
+VERBOSE = False
+COMMAND_ENV: dict[str, str] | None = None
+RETRY_ATTEMPTS = 5
+RETRY_BASE_DELAY_SECONDS = 2
+TRANSIENT_ERROR_MARKERS = (
+    "bad gateway",
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "context deadline exceeded",
+    "could not resolve host",
+    "couldn't connect to server",
+    "empty reply from server",
+    "failed to connect",
+    "http 408",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "i/o timeout",
+    "tls handshake timeout",
+    "remote end hung up unexpectedly",
+    "unexpected eof",
+)
 
 
 class SubmitError(RuntimeError):
     """Submission cannot continue safely."""
 
 
-def run(command: list[str], cwd: Path, input_text: str | None = None) -> str:
-    result = subprocess.run(command, cwd=cwd, text=True, input=input_text, capture_output=True)
-    if result.returncode:
-        raise SubmitError(result.stderr.strip() or f"{' '.join(command)} failed")
-    return result.stdout.strip()
+def progress(stage: str, message: str) -> None:
+    print(f"[{stage}] {message}", file=sys.stderr, flush=True)
+
+
+def display_command(command: list[str]) -> str:
+    sanitized: list[str] = []
+    redact_next = False
+    for argument in command:
+        if redact_next:
+            sanitized.append("<redacted>")
+            redact_next = False
+        elif argument == "--body":
+            sanitized.append(argument)
+            redact_next = True
+        elif argument.startswith("body="):
+            sanitized.append("body=<redacted>")
+        else:
+            sanitized.append(argument)
+    return shlex.join(sanitized)
+
+
+def configure_command_environment(repository: str) -> None:
+    global COMMAND_ENV
+    host, _, _ = split_repository(repository)
+    COMMAND_ENV = os.environ.copy()
+    if host and host.casefold() != "github.com" and COMMAND_ENV.pop("GH_TOKEN", None):
+        progress(
+            "auth",
+            f"ignoring GH_TOKEN for enterprise host {host}; using GH_ENTERPRISE_TOKEN "
+            "or the stored gh credential",
+        )
+
+
+def is_transient_failure(message: str) -> bool:
+    normalized = message.casefold()
+    return bool(re.search(r"\beof\b", normalized)) or any(
+        marker in normalized for marker in TRANSIENT_ERROR_MARKERS
+    )
+
+
+def retry_delay(attempt: int, operation: str) -> None:
+    delay = min(RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1), 30)
+    print(
+        f"transient network failure during {operation}; retrying in {delay}s "
+        f"({attempt + 1}/{RETRY_ATTEMPTS})",
+        file=sys.stderr,
+    )
+    time.sleep(delay)
+
+
+def run(
+    command: list[str],
+    cwd: Path,
+    input_text: str | None = None,
+    *,
+    retry_transient: bool = False,
+) -> str:
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        if VERBOSE:
+            progress("command", display_command(command))
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            input=input_text,
+            capture_output=True,
+            env=COMMAND_ENV,
+        )
+        if not result.returncode:
+            if VERBOSE:
+                progress("command", f"ok: {command[0]}")
+            return result.stdout.strip()
+        error = result.stderr.strip() or f"{' '.join(command)} failed"
+        if not retry_transient or not is_transient_failure(error) or attempt == RETRY_ATTEMPTS:
+            raise SubmitError(error)
+        retry_delay(attempt, command[0])
+    raise AssertionError("retry loop exhausted")
 
 
 def git(repo: Path, *args: str) -> str:
-    return run(["git", *args], repo)
+    retry_transient = bool(args) and args[0] in {"fetch", "ls-remote"}
+    return run(["git", *args], repo, retry_transient=retry_transient)
 
 
-def gh(repo: Path, repository: str, *args: str) -> str:
-    return run(["gh", *args, "--repo", repository], repo)
+def gh(
+    repo: Path,
+    repository: str,
+    *args: str,
+    retry_transient: bool = True,
+) -> str:
+    return run(["gh", *args, "--repo", repository], repo, retry_transient=retry_transient)
 
 
 def resolve(repo: Path, revision: str) -> str:
@@ -43,7 +149,11 @@ def resolve(repo: Path, revision: str) -> str:
 
 
 def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
-    result = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=repo)
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo,
+        env=COMMAND_ENV,
+    )
     return result.returncode == 0
 
 
@@ -320,35 +430,24 @@ def render_manual_instructions(
 
 def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str, Any]]) -> None:
     host, owner, name = split_repository(manifest["repository"])
+    progress("preflight", f"checking authentication and push permission for {manifest['repository']}")
     if host:
-        run(["gh", "auth", "status", "--hostname", host], repo)
+        run(["gh", "auth", "status", "--hostname", host], repo, retry_transient=True)
     endpoint = f"repos/{owner}/{name}"
     permission = ["gh", "api"]
     if host:
         permission.extend(["--hostname", host])
     permission.extend([endpoint, "--jq", ".permissions.push"])
-    if run(permission, repo) != "true":
+    if run(permission, repo, retry_transient=True) != "true":
         raise SubmitError("authenticated user lacks push permission for upstream stack branches")
     repository = manifest["repository"]
     for index, layer in enumerate(layers):
-        existing = json.loads(
-            gh(
-                repo,
-                repository,
-                "pr",
-                "list",
-                "--state",
-                "all",
-                "--head",
-                layer["remote_branch"],
-                "--limit",
-                "100",
-                "--json",
-                "number,url,state,isDraft,baseRefName,headRefName",
-            )
-            or "[]"
-        )
         expected_base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
+        progress(
+            "preflight",
+            f"{index + 1}/{len(layers)}: {layer['remote_branch']} -> {expected_base}",
+        )
+        existing = pull_requests_for_head(repo, repository, layer["remote_branch"])
         if len(existing) > 1:
             raise SubmitError(f"multiple PRs exist for {layer['remote_branch']}")
         if existing:
@@ -365,13 +464,129 @@ def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str
             )
 
 
+def pull_requests_for_head(
+    repo: Path,
+    repository: str,
+    remote_branch: str,
+) -> list[dict[str, Any]]:
+    return json.loads(
+        gh(
+            repo,
+            repository,
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--head",
+            remote_branch,
+            "--limit",
+            "100",
+            "--json",
+            "number,url,state,isDraft,baseRefName,headRefName",
+        )
+        or "[]"
+    )
+
+
+def reconcile_created_pull_request(
+    repo: Path,
+    manifest: dict[str, Any],
+    layer: dict[str, Any],
+    expected_base: str,
+) -> dict[str, Any] | None:
+    existing = pull_requests_for_head(repo, manifest["repository"], layer["remote_branch"])
+    if not existing:
+        return None
+    if len(existing) > 1:
+        raise SubmitError(f"multiple PRs exist for {layer['remote_branch']}")
+    pr = existing[0]
+    if (
+        pr["state"] != "OPEN"
+        or pr["baseRefName"] != expected_base
+        or bool(pr["isDraft"]) != bool(manifest.get("draft"))
+    ):
+        raise SubmitError(f"ambiguous PR creation conflicts for {layer['remote_branch']}")
+    return pr
+
+
+def create_pull_request(
+    repo: Path,
+    manifest: dict[str, Any],
+    layer: dict[str, Any],
+    base: str,
+    body_file: str,
+) -> dict[str, Any]:
+    arguments = [
+        "pr",
+        "create",
+        "--base",
+        base,
+        "--head",
+        layer["remote_branch"],
+        "--title",
+        layer["title"],
+        "--body-file",
+        body_file,
+    ]
+    if manifest.get("draft"):
+        arguments.append("--draft")
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            url = gh(
+                repo,
+                manifest["repository"],
+                *arguments,
+                retry_transient=False,
+            ).splitlines()[-1]
+            return {
+                "number": int(url.rstrip("/").rsplit("/", 1)[-1]),
+                "url": url,
+                "state": "OPEN",
+            }
+        except SubmitError as exc:
+            if not is_transient_failure(str(exc)):
+                raise
+            progress(
+                "submit",
+                f"ambiguous create for {layer['remote_branch']}; checking remote state",
+            )
+            existing = reconcile_created_pull_request(repo, manifest, layer, base)
+            if existing:
+                progress("submit", f"reconciled PR #{existing['number']} after transport failure")
+                return existing
+            if attempt == RETRY_ATTEMPTS:
+                raise
+            retry_delay(attempt, "gh pr create")
+    raise AssertionError("retry loop exhausted")
+
+
 def publish(repo: Path, manifest: dict[str, Any], layer: dict[str, Any]) -> None:
     remote = manifest["publish_remote"]
     old = remote_sha(repo, remote, layer["remote_branch"])
+    if old == layer["_tip"]:
+        return
     lease = f"--force-with-lease=refs/heads/{layer['remote_branch']}:{old or ''}"
-    git(repo, "push", lease, remote, f"{layer['_tip']}:refs/heads/{layer['remote_branch']}")
-    if remote_sha(repo, remote, layer["remote_branch"]) != layer["_tip"]:
-        raise SubmitError(f"published branch SHA mismatch: {layer['remote_branch']}")
+    refspec = f"{layer['_tip']}:refs/heads/{layer['remote_branch']}"
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            git(repo, "push", lease, remote, refspec)
+        except SubmitError as exc:
+            if not is_transient_failure(str(exc)):
+                raise
+            published = remote_sha(repo, remote, layer["remote_branch"])
+            if published == layer["_tip"]:
+                return
+            if published != old:
+                raise SubmitError(
+                    f"remote branch changed during push: {layer['remote_branch']}"
+                ) from exc
+            if attempt == RETRY_ATTEMPTS:
+                raise
+            retry_delay(attempt, "git push")
+            continue
+        if remote_sha(repo, remote, layer["remote_branch"]) != layer["_tip"]:
+            raise SubmitError(f"published branch SHA mismatch: {layer['remote_branch']}")
+        return
 
 
 def verify_pull_request(
@@ -415,13 +630,47 @@ def upsert_navigation_comment(
     if host:
         command.extend(["--hostname", host])
     endpoint = f"repos/{owner}/{name}/issues/{pr['number']}/comments"
-    comments = json.loads(run([*command, f"{endpoint}?per_page=100"], repo) or "[]")
+    comments = json.loads(
+        run([*command, f"{endpoint}?per_page=100"], repo, retry_transient=True) or "[]"
+    )
     match = next((item for item in comments if MARKER in (item.get("body") or "")), None)
     if match:
         comment_endpoint = f"repos/{owner}/{name}/issues/comments/{match['id']}"
-        run([*command, "--method", "PATCH", comment_endpoint, "-f", f"body={body}"], repo)
+        run(
+            [*command, "--method", "PATCH", comment_endpoint, "-f", f"body={body}"],
+            repo,
+            retry_transient=True,
+        )
     else:
-        gh(repo, manifest["repository"], "pr", "comment", pr["url"], "--body", body)
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                gh(
+                    repo,
+                    manifest["repository"],
+                    "pr",
+                    "comment",
+                    pr["url"],
+                    "--body",
+                    body,
+                    retry_transient=False,
+                )
+                return
+            except SubmitError as exc:
+                if not is_transient_failure(str(exc)):
+                    raise
+                comments = json.loads(
+                    run(
+                        [*command, f"{endpoint}?per_page=100"],
+                        repo,
+                        retry_transient=True,
+                    )
+                    or "[]"
+                )
+                if any(MARKER in (item.get("body") or "") for item in comments):
+                    return
+                if attempt == RETRY_ATTEMPTS:
+                    raise
+                retry_delay(attempt, "gh pr comment")
 
 
 def submit(
@@ -434,6 +683,7 @@ def submit(
     manual_links: Path | None,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
+    configure_command_environment(manifest["repository"])
     layers = validate(repo, manifest_path, manifest)
     links = load_manual_links(manual_links, len(layers)) if manual else {}
     journal: dict[str, Any] = {
@@ -494,11 +744,17 @@ def submit(
         write_journal(output, journal)
         return journal
     github_preflight(repo, manifest, layers)
-    for layer in layers:
+    for index, layer in enumerate(layers):
+        progress("publish", f"{index + 1}/{len(layers)}: {layer['remote_branch']}")
         publish(repo, manifest, layer)
     for index, layer in enumerate(layers):
         base = manifest["default_base"] if index == 0 else layers[index - 1]["remote_branch"]
         existing = layer.get("_existing_pr")
+        action = "updating" if existing else "creating"
+        progress(
+            "submit",
+            f"{index + 1}/{len(layers)}: {action} {layer['remote_branch']} -> {base}",
+        )
         body = render_body(
             layers,
             links,
@@ -525,28 +781,17 @@ def submit(
                 )
                 pr = existing
             else:
-                arguments = [
-                    "pr",
-                    "create",
-                    "--base",
-                    base,
-                    "--head",
-                    layer["remote_branch"],
-                    "--title",
-                    layer["title"],
-                    "--body-file",
-                    handle.name,
-                ]
-                if manifest.get("draft"):
-                    arguments.append("--draft")
-                url = gh(repo, manifest["repository"], *arguments).splitlines()[-1]
-                number = int(url.rstrip("/").rsplit("/", 1)[-1])
-                pr = {"number": number, "url": url, "state": "OPEN"}
+                pr = create_pull_request(repo, manifest, layer, base, handle.name)
         links[index] = {"number": pr["number"], "url": pr["url"]}
+        progress("submit", f"recorded PR #{pr['number']}: {pr['url']}")
         journal["layers"][index]["pr"] = links[index]
         journal["status"] = "submitting"
         write_journal(output, journal)
     for index, layer in enumerate(layers):
+        progress(
+            "finalize",
+            f"{index + 1}/{len(layers)}: linking PR #{links[index]['number']}",
+        )
         body = render_body(
             layers,
             links,
@@ -576,6 +821,7 @@ def submit(
 
 
 def main() -> int:
+    global VERBOSE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
@@ -586,7 +832,9 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--rendered-dir", type=Path)
     parser.add_argument("--manual-links", type=Path)
+    parser.add_argument("--verbose", action="store_true", help="show sanitized git/gh commands")
     args = parser.parse_args()
+    VERBOSE = args.verbose
     try:
         result = submit(
             args.repo.resolve(),

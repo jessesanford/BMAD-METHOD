@@ -5,9 +5,8 @@ description: 'Submit a validated PR-ready branch stack as ordered, reviewer-frie
 
 # Submit Stacked PRs Workflow
 
-**Goal:** Submit a PR-ready feature stack through legacy GitHub pull requests while making each layer
-small, correctly based, and easy to navigate. Create the planning PR first, then implementation PRs in
-dependency order, and finish with a fully linked stack map on every PR.
+**Goal:** Submit a PR-ready stack as focused legacy GitHub pull requests. Create the planning PR first,
+then implementation PRs in dependency order, and finish with a fully linked stack map on every PR.
 
 **Your Role:** Stacked-PR release operator and reviewer advocate. The LLM explains intent, risk, and
 review guidance using the upstream template. Deterministic tooling validates refs and permissions,
@@ -79,7 +78,8 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   targets the prior layer's remote branch.</action>
   <action>Run
   `uv run {skill-root}/scripts/submit_pr_stack.py &lt;manifest&gt; --dry-run --output &lt;journal&gt;`.
-  Review each title, base/head pair, source SHA, body, stack table, and Mermaid dependency graph.</action>
+  Review titles, bases, heads, SHAs, bodies, table, and graph; add `--verbose` for sanitized commands
+  and per-layer progress.</action>
   <check if="authentication, push permission, target SHA, ancestry, upstream remote identity, or an existing PR conflicts">
     Report the exact failed invariant before branch publication or PR creation. Ask the user to retry
     the same target, choose another remote and base branch, or stop safely. A new target returns to
@@ -101,9 +101,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>After human-visible dry-run approval, run the script with `--apply`. The script preflights all
   remote and GitHub invariants before side effects, publishes exact SHAs with force-with-lease, creates
   the planning PR first, and creates each subsequent PR against the prior upstream-hosted layer.</action>
-  <action>Reuse an open PR only when its head and base exactly match the manifest. Refuse closed,
-  merged, duplicate, or mismatched PR state. Persist the journal after every successful operation so a
-  retry can resume idempotently.</action>
+  <action>Reuse an open PR only when head and base match; refuse closed, duplicate, or mismatched state.
+  Persist after each success. Retry transient reads and idempotent writes with bounded backoff, but
+  leave ambiguous creates to an idempotent rerun that reconciles remote state from the journal.</action>
   <action>During sequential creation, prior PR titles and graph nodes are clickable and future nodes
   are marked pending. Explain stacked PRs with a link to `https://www.stacking.dev/`. After all PRs
   exist, update every body and one marker comment per PR with the complete linked graph and ordered

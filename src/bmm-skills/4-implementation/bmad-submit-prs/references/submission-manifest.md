@@ -56,3 +56,7 @@ Run the same manifest with `--manual --rendered-dir <directory>` to create numbe
 `SUBMIT.md`. After creating PRs, add their 1-based `position`, `number`, and `url` to
 `manual-links.json`, then rerun with `--manual-links <file>` to regenerate descriptions whose prior
 stack nodes are clickable and whose future nodes remain Pending.
+
+Use `--verbose` during automatic submission to show sanitized `git`/`gh` commands and per-layer
+progress. For enterprise repositories the script ignores `GH_TOKEN` (the GitHub.com token variable)
+and uses `GH_ENTERPRISE_TOKEN` or the stored credential for that host.
