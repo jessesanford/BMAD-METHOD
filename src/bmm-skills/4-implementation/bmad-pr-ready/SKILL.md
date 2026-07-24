@@ -88,9 +88,15 @@ exclude local process artifacts, create safety refs, and push with exact leases.
 <step n="6" goal="Validate the PR-ready stack as the submitted product">
   <action>Verify every target ends in `-pr-ready`, forms one ancestry chain from upstream, contains no
   newly introduced excluded path, and matches the sanitized source deltas plus declared overlays.</action>
-  <action>Build a fresh disposable cumulative branch from the PR-ready stack and run the repository's
-  full integration/acceptance suite. A failing test blocks completion and routes to correction on the
-  owning source story branch, followed by a fresh PR-ready rebuild.</action>
+  <action>Define strict argv-only tests, builds/artifact globs, and default/disabled feature-flag
+  checks in an evidence config. Run `python3 {skill-root}/scripts/produce_validation_evidence.py
+  &lt;applied-report&gt; &lt;config&gt; --repo {project-root} --branch &lt;evidence-branch&gt;`.
+  The producer validates every prefix in a detached worktree, hashes final artifacts, commits its
+  report, and emits the `integration_evidence` fragment required by `bmad-submit-prs`.</action>
+  <action>Any stale target, command, parsed test summary, artifact, ancestry, or ref-lease failure
+  blocks completion without updating the evidence branch. Correct the owning source story, rebuild
+  the PR-ready stack, and rerun the producer; use `--expected-old &lt;full-SHA&gt;` to replace an
+  existing evidence ref exactly.</action>
   <action>Report source/target SHAs, commit-boundary decisions, exclusions, safety refs, push results,
   manifest/report paths, and integration outcome.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
