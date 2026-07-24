@@ -22,6 +22,10 @@ def write(name, content="wheel"):
     path.parent.mkdir(exist_ok=True); path.write_text(content)
 if mode == "fail" and pathlib.Path("two.txt").exists():
     raise SystemExit(4)
+if mode == "probe-fail":
+    raise SystemExit(5)
+if mode == "probe-fail-second" and pathlib.Path("two.txt").exists():
+    raise SystemExit(5)
 if mode in ("test", "fail", "test-artifact"): print("Ran 2 tests in 0.001s\\n\\nOK (skipped=1)")
 if mode == "test-artifact":
     write("dist/package.whl")
@@ -93,7 +97,8 @@ class EvidenceTests(unittest.TestCase):
                     "integration_evidence": evidence}
         with mock.patch.object(SUBMIT, "remote_sha", return_value=evidence["commit"]):
             SUBMIT.validate_integration_evidence(self.repo, manifest,
-                                                 [{"_tip": self.first}, {"_tip": self.second}])
+                                                 [{"_tip": self.first, "remote_branch": "one-pr-ready"},
+                                                  {"_tip": self.second, "remote_branch": "two-pr-ready"}])
         self.assertEqual(evidence["partial_merge_safety"]["validated_prefixes"], 2)
         self.assertEqual(evidence["partial_merge_safety"]["prefix_tips"], [self.first, self.second])
         self.assertEqual(git(self.repo, "rev-parse", f"{evidence['commit']}^"), self.second)
@@ -104,6 +109,45 @@ class EvidenceTests(unittest.TestCase):
                         "ResourceWarning: leak\nOK"):
             with self.subTest(summary=summary), self.assertRaises(PRODUCER.EvidenceError):
                 PRODUCER.test_counts(f"Ran 2 tests\n\n{summary}", "unittest")
+    def test_pytest_parser_accepts_clean_summary_and_rejects_failures_or_missing_summary(self) -> None:
+        self.assertEqual(
+            PRODUCER.test_counts("===== 5 passed in 0.12s =====", "pytest"),
+            {"passed": 5, "skipped": 0, "warnings": 0},
+        )
+        self.assertEqual(
+            PRODUCER.test_counts(
+                "===== 5 passed, 1 skipped, 2 warnings in 0.12s =====", "pytest"
+            ),
+            {"passed": 5, "skipped": 1, "warnings": 2},
+        )
+        for output, message in (
+            ("===== 4 passed, 1 failed in 0.12s =====", "failures or errors"),
+            ("===== 4 passed, 1 error in 0.12s =====", "failures or errors"),
+            ("collected 5 items", "no unique summary"),
+            (
+                "===== 5 passed in 0.12s =====\n===== 5 passed in 0.12s =====",
+                "no unique summary",
+            ),
+            ("===== 5 xfailed in 0.12s =====", "unsupported outcomes"),
+        ):
+            with self.subTest(output=output), self.assertRaisesRegex(
+                PRODUCER.EvidenceError, message
+            ):
+                PRODUCER.test_counts(output, "pytest")
+    def test_failing_later_prefix_safety_probes_preserve_evidence_ref(self) -> None:
+        git(self.repo, "branch", "integration/validated", self.first)
+        for field, label in (
+            ("default_check_argv", "default safety check"),
+            ("disabled_check_argv", "disabled safety check"),
+        ):
+            with self.subTest(field=field):
+                value = json.loads(self.config.read_text())
+                value["feature_flag"][field] = ["python3", "runner.py", "probe-fail-second"]
+                self.config.write_text(json.dumps(value))
+                with self.assertRaisesRegex(PRODUCER.EvidenceError, label):
+                    self.produce()
+                self.assertEqual(self.ref("integration/validated"), self.first)
+                self.write_config()
     def test_prefix_test_failure_leaves_no_ref(self) -> None:
         self.write_config(test="fail")
         with self.assertRaisesRegex(PRODUCER.EvidenceError, "two-pr-ready"): self.produce()
