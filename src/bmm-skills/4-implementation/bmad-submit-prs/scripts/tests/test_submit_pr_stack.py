@@ -102,7 +102,6 @@ class SubmitterTests(unittest.TestCase):
         self.assertEqual(rendered.count("| `release` |"), 2)
         self.assertNotIn("`stack/plan-pr-ready` |", rendered)
 
-
     def test_merge_gate_uses_feature_name_and_explicit_prerequisites(self) -> None:
         first = MODULE.render_merge_warning(
             self.layers,
@@ -175,6 +174,33 @@ class SubmitterTests(unittest.TestCase):
         self.assertIn("**42 passed, 1 skipped, 0 warnings**", rendered)
         self.assertIn("feature_x-1.0.0-py3-none-any.whl", rendered)
 
+    def test_combined_stack_body_is_draft_only_and_links_components(self) -> None:
+        manifest = {
+            "feature_name": "Arize AX",
+            "stack_label": "arize-ax",
+            "integration_evidence": self.evidence,
+        }
+        layers = [
+            dict(layer, _tip=str(index + 1) * 40)
+            for index, layer in enumerate(self.layers)
+        ]
+        rendered = MODULE.render_integration_body(
+            manifest,
+            layers,
+            {
+                0: {"number": 41, "url": "https://example.test/pull/41"},
+                1: {"number": 42, "url": "https://example.test/pull/42"},
+            },
+        )
+
+        self.assertTrue(rendered.startswith("> [!CAUTION]"))
+        self.assertIn("Combined stack validation PR - DO NOT MERGE", rendered)
+        self.assertIn("Review and merge the component PRs", rendered)
+        self.assertIn("https://example.test/pull/41", rendered)
+        self.assertIn("https://example.test/pull/42", rendered)
+        self.assertIn("authoritative target-repository CI result", rendered)
+        self.assertIn("does not claim", rendered)
+
     @mock.patch.object(MODULE, "remote_sha")
     @mock.patch.object(MODULE, "git")
     @mock.patch.object(MODULE, "is_ancestor")
@@ -211,6 +237,11 @@ class SubmitterTests(unittest.TestCase):
 
         self.assertIn("_branch_url", manifest["integration_evidence"])
         self.assertIn("_report_url", manifest["integration_evidence"])
+        self.assertTrue(
+            manifest["integration_evidence"]["_branch_url"].startswith(
+                "https://example.test/contributor/repo/"
+            )
+        )
         git_mock.assert_called_once_with(
             Path.cwd(),
             "show",
@@ -244,6 +275,7 @@ class SubmitterTests(unittest.TestCase):
         manifest = {
             "repository": "example.test/owner/repo",
             "publish_remote": "origin",
+            "_head_repository": "example.test/contributor/repo",
             "integration_evidence": evidence,
         }
 
@@ -280,14 +312,17 @@ class SubmitterTests(unittest.TestCase):
         )
 
     @mock.patch.object(MODULE, "gh_api")
-    def test_head_lookup_is_scoped_to_fork_owner(self, api_mock: mock.Mock) -> None:
+    def test_head_lookup_is_scoped_to_fork_owner(
+        self,
+        api_mock: mock.Mock,
+    ) -> None:
         api_mock.return_value = json.dumps(
             [
                 {
                     "number": 41,
                     "html_url": "https://example.test/owner/repo/pull/41",
                     "state": "open",
-                    "draft": False,
+                    "draft": True,
                     "base": {"ref": "main"},
                     "head": {
                         "ref": "stack/story-pr-ready",
@@ -306,7 +341,10 @@ class SubmitterTests(unittest.TestCase):
         )
 
         self.assertEqual(pulls[0]["headRepositoryOwner"], "contributor")
-        self.assertIn("head=contributor:stack%2Fstory-pr-ready", api_mock.call_args.args[2])
+        self.assertIn(
+            "head=contributor:stack%2Fstory-pr-ready",
+            api_mock.call_args.args[2],
+        )
 
     @mock.patch.object(MODULE.time, "sleep")
     @mock.patch.object(MODULE.subprocess, "run")
@@ -383,7 +421,6 @@ class SubmitterTests(unittest.TestCase):
 
         retry_delay_mock.assert_not_called()
 
-
     @mock.patch.object(
         MODULE,
         "gh",
@@ -453,6 +490,118 @@ class SubmitterTests(unittest.TestCase):
         reconcile_mock.assert_called_once()
         retry_delay_mock.assert_not_called()
 
+    def test_manual_instructions_include_order_files_and_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            rendered = MODULE.render_manual_instructions(
+                {
+                    "repository": "github.example.com/owner/repo",
+                    "default_base": "main",
+                    "_head_repository": "github.example.com/contributor/repo",
+                    "_head_owner": "contributor",
+                    "_integration_layer": {
+                        "_head_ref": "contributor:integration/feature-x"
+                    },
+                    "feature_summary": "Adds focused behavior.",
+                    "stack_label": "feature-x",
+                },
+                self.layers,
+                {0: {"number": 41, "url": "https://github.example.com/owner/repo/pull/41"}},
+                directory / "manifest.json",
+                directory,
+                directory / "manual-links.json",
+                directory / "journal.json",
+            )
+        self.assertIn("01-title.txt", rendered)
+        self.assertIn("02-body.md", rendered)
+        self.assertIn("stack/story-pr-ready", rendered)
+        self.assertIn("[#41](https://github.example.com/owner/repo/pull/41)", rendered)
+        self.assertIn("Pending", rendered)
+        self.assertEqual(rendered.count('--base "main"'), 1)
+        self.assertNotIn('--base "stack/plan-pr-ready"', rendered)
+        self.assertIn('--head "contributor:stack/story-pr-ready"', rendered)
+        self.assertIn("integration-title.txt", rendered)
+        self.assertIn("integration-body.md", rendered)
+        self.assertIn('gh pr edit "https://github.example.com/owner/repo/pull/41"', rendered)
+        self.assertIn('--body-file "02-body.md" --draft', rendered)
+        self.assertNotIn('--body-file "01-body.md" --draft', rendered)
+        self.assertIn("Not ready.", rendered)
+        self.assertNotIn('--body-file "integration-body.md" --draft', rendered)
+
+    def test_manual_integration_command_requires_every_component_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            rendered = MODULE.render_manual_instructions(
+                {
+                    "repository": "github.example.com/owner/repo",
+                    "default_base": "main",
+                    "_head_repository": "github.example.com/contributor/repo",
+                    "_head_owner": "contributor",
+                    "_integration_layer": {
+                        "_head_ref": "contributor:integration/feature-x"
+                    },
+                    "feature_summary": "Adds focused behavior.",
+                    "stack_label": "feature-x",
+                },
+                self.layers,
+                {
+                    0: {
+                        "number": 41,
+                        "url": "https://github.example.com/owner/repo/pull/41",
+                    },
+                    1: {
+                        "number": 42,
+                        "url": "https://github.example.com/owner/repo/pull/42",
+                    },
+                },
+                directory / "manifest.json",
+                directory,
+                directory / "manual-links.json",
+                directory / "journal.json",
+            )
+        self.assertIn('--body-file "integration-body.md" --draft', rendered)
+        self.assertNotIn("Not ready.", rendered)
+
+    def test_manual_existing_integration_enables_final_refresh_and_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            component_links = {
+                0: {
+                    "number": 41,
+                    "url": "https://github.example.com/owner/repo/pull/41",
+                },
+                1: {
+                    "number": 42,
+                    "url": "https://github.example.com/owner/repo/pull/42",
+                },
+            }
+            rendered = MODULE.render_manual_instructions(
+                {
+                    "repository": "github.example.com/owner/repo",
+                    "default_base": "main",
+                    "draft": False,
+                    "_head_repository": "github.example.com/contributor/repo",
+                    "_head_owner": "contributor",
+                    "_integration_layer": {
+                        "_head_ref": "contributor:integration/feature-x"
+                    },
+                    "_existing_integration_pr": {
+                        "number": 43,
+                        "url": "https://github.example.com/owner/repo/pull/43",
+                    },
+                    "feature_summary": "Adds focused behavior.",
+                    "stack_label": "feature-x",
+                },
+                self.layers,
+                component_links,
+                directory / "manifest.json",
+                directory,
+                directory / "manual-links.json",
+                directory / "journal.json",
+            )
+        self.assertIn('gh pr edit "https://github.example.com/owner/repo/pull/43"', rendered)
+        self.assertIn('gh pr ready "https://github.example.com/owner/repo/pull/41"', rendered)
+        self.assertIn('gh pr ready "https://github.example.com/owner/repo/pull/42"', rendered)
 
     def test_reconcile_create_requires_exact_draft_head(self) -> None:
         layer = {
@@ -486,39 +635,6 @@ class SubmitterTests(unittest.TestCase):
                     "main",
                 )
 
-    def test_manual_instructions_include_order_files_and_graph(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            rendered = MODULE.render_manual_instructions(
-                {
-                    "repository": "github.example.com/owner/repo",
-                    "default_base": "main",
-                    "_head_repository": "github.example.com/contributor/repo",
-                    "_head_owner": "contributor",
-                    "feature_summary": "Adds focused behavior.",
-                    "stack_label": "feature-x",
-                },
-                self.layers,
-                {0: {"number": 41, "url": "https://github.example.com/owner/repo/pull/41"}},
-                directory / "manifest.json",
-                directory,
-                directory / "manual-links.json",
-                directory / "journal.json",
-            )
-        self.assertIn("01-title.txt", rendered)
-        self.assertIn("02-body.md", rendered)
-        self.assertIn("stack/story-pr-ready", rendered)
-        self.assertIn("[#41](https://github.example.com/owner/repo/pull/41)", rendered)
-        self.assertIn("Pending", rendered)
-        self.assertEqual(rendered.count('--base "main"'), 1)
-        self.assertNotIn('--base "stack/plan-pr-ready"', rendered)
-        self.assertIn('--head "contributor:stack/story-pr-ready"', rendered)
-        self.assertIn('--body-file "02-body.md" --draft', rendered)
-        self.assertNotIn('gh pr create --repo "github.example.com/owner/repo" --base "main" '
-                         '--head "contributor:stack/plan-pr-ready"', rendered)
-        self.assertIn('Create draft', rendered)
-        self.assertIn('gh pr edit "https://github.example.com/owner/repo/pull/41"', rendered)
-
     def test_manual_links_use_one_based_positions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "links.json"
@@ -545,7 +661,6 @@ class SubmitterTests(unittest.TestCase):
             MODULE.parse_remote("https://github.example.com/owner/repo.git"),
             ("github.example.com", "owner", "repo"),
         )
-
 
     def test_manual_links_reject_gapped_prerequisites(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
