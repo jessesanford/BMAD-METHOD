@@ -1,0 +1,43 @@
+# Stacked PR Submission Manifest
+
+Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
+
+```json
+{
+  "schema_version": 1,
+  "repository": "github.example.com/upstream/project",
+  "publish_remote": "upstream",
+  "default_base": "main",
+  "draft": false,
+  "template_source": ".github/PULL_REQUEST_TEMPLATE.md",
+  "layers": [
+    {
+      "branch": "feature/plan-pr-ready",
+      "remote_branch": "contrib/alice/feature/plan-pr-ready",
+      "tip": "FULL_LOCAL_SHA",
+      "title": "docs: propose feature",
+      "summary": "Reviewer-facing feature plan and stack overview.",
+      "body_file": "01-plan.md"
+    },
+    {
+      "branch": "feature/story-1-pr-ready",
+      "remote_branch": "contrib/alice/feature/story-1-pr-ready",
+      "tip": "FULL_LOCAL_SHA",
+      "title": "feat: add the first feature layer",
+      "summary": "The first independently reviewable implementation layer.",
+      "body_file": "02-story-1.md"
+    }
+  ]
+}
+```
+
+- `repository` is `[HOST/]OWNER/REPO` in `gh` syntax.
+- `publish_remote` must resolve to that same repository. This requirement is what permits each PR to
+  use the prior layer as its GitHub base and show only its focused diff.
+- `branch` is an existing local PR-ready branch; `tip` is its immutable full SHA.
+- `remote_branch` is the branch published in the upstream repository. Prefer an isolated contributor
+  namespace and avoid protected or existing feature branches.
+- The first PR base is `default_base`; each later PR base is the prior `remote_branch`.
+- `body_file` resolves relative to the manifest. It contains the upstream template plus layer-specific
+  content. The script appends and updates deterministic stack navigation.
+- Set `draft` when the complete stack should initially avoid normal ready-for-review signaling.
