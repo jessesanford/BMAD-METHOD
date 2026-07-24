@@ -75,6 +75,8 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
 - `stack_label` is 1-4 succinct, feature-derived lowercase keywords such as `arize-ax`. It need not
   prove repository-wide uniqueness.
 - `integration_evidence` is mandatory and fail-closed:
+  - Generate this object with `bmad-pr-ready/scripts/produce_validation_evidence.py` from the applied
+    builder report and its strict argv-only validation config; copy the emitted object unchanged.
   - `branch` must exist locally and on `publish_remote` at the exact full `commit`.
   - `commit` must descend from the final stack layer and contain `report_path`.
   - `tests` records the exact command and its pass, skip, and warning counts.
