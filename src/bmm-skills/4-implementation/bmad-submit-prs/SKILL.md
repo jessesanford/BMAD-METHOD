@@ -6,9 +6,9 @@ description: 'Submit a validated PR-ready branch stack as ordered, reviewer-frie
 # Submit Stacked PRs Workflow
 
 **Goal:** Submit a PR-ready stack as focused legacy GitHub pull requests. Create the planning PR first,
-then implementation PRs in dependency order, and finish with a fully linked stack map on every PR.
+then implementation PRs in dependency order, and fully cross-link every PR.
 
-**Your Role:** Stacked-PR release operator and reviewer advocate. The LLM explains intent, risk, and
+**Your Role:** Stacked-PR release operator. The LLM explains intent, risk, and
 review guidance using the upstream template. Deterministic tooling validates refs and permissions,
 publishes exact branch tips, creates or updates PRs idempotently, and cross-links the completed stack.
 
@@ -66,10 +66,10 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   and record the choice.</action>
   <action>If none exists, use these sections: Summary; Motivation and context; Changes; Testing;
   Risk, rollout, and compatibility; Reviewer guidance; Checklist.</action>
-  <action>Write a feature summary and one body file per layer. The planning PR explains the feature,
-  split, layers, merge order, validation, and reviewer path. Each implementation PR links to the plan,
-  states its place, scopes its changes, names its prerequisite, and gives focused validation and risk
-  notes without repeating the design.</action>
+  <action>Choose 1-4 succinct feature keywords without checking uniqueness; project titles as
+  `<prefix>(stacked-pr: <keywords> [N/X]): <subject>`. Write a feature summary and body per layer.
+  The plan explains feature, split, order, validation, and reviewer path. Implementation PRs link it
+  and state scope, prerequisite, validation, and risk without repeating the design.</action>
 </step>
 
 <step n="3" goal="Create a fail-closed submission manifest">
