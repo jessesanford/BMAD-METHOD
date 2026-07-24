@@ -54,7 +54,7 @@ def collect(repo: Path, base: str, layers: list[tuple[str, str]]) -> dict:
                     "sha": sha,
                     "subject": metadata[0] if metadata else "",
                     "body": "\n".join(metadata[1:]).strip(),
-                    "files": git(repo, "diff-tree", "--no-commit-id", "--name-status", "-r", sha).splitlines(),
+                    "files": git(repo, "diff-tree", "-M", "--no-commit-id", "--name-status", "-r", sha).splitlines(),
                     "shortstat": git(repo, "show", "--format=", "--shortstat", sha).strip(),
                 }
             )
@@ -64,7 +64,7 @@ def collect(repo: Path, base: str, layers: list[tuple[str, str]]) -> dict:
                 "source_tip": source_sha,
                 "source_parent": parent_sha,
                 "commits": commits,
-                "layer_files": git(repo, "diff", "--name-status", parent_sha, source_sha).splitlines(),
+                "layer_files": git(repo, "diff", "-M", "--name-status", parent_sha, source_sha).splitlines(),
                 "layer_shortstat": git(repo, "diff", "--shortstat", parent_sha, source_sha).strip(),
             }
         )

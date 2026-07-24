@@ -224,15 +224,23 @@ class SubmitterTests(unittest.TestCase):
         is_ancestor_mock.return_value = True
         remote_sha_mock.return_value = "a" * 40
         git_mock.return_value = (
-            "uv run pytest\n42 passed, 1 skipped, 0 warnings\n2/2\n"
-            "FEATURE_X_ENABLED\nfirst\nfinal\nfeature_x-1.0.0-py3-none-any.whl\n"
-            f"{'b' * 64}\n"
+            "- Test command: `uv run pytest`\n"
+            "- Final tests: 42 passed, 1 skipped, 0 warnings\n"
+            "- Prefix coverage: 2/2\n"
+            "- Feature flag: `FEATURE_X_ENABLED`; default: `disabled`\n"
+            "- Disabled behavior: the disabled path does not initialize the feature\n"
+            "| `one` | `first` | passed | 42 passed, 1 skipped, 0 warnings |\n"
+            "| `two` | `final` | passed | 42 passed, 1 skipped, 0 warnings |\n"
+            f"| `feature_x-1.0.0-py3-none-any.whl` | passed | `{'b' * 64}` |\n"
         )
 
         MODULE.validate_integration_evidence(
             Path.cwd(),
             manifest,
-            [{"_tip": "first"}, {"_tip": "final"}],
+            [
+                {"_tip": "first", "remote_branch": "one"},
+                {"_tip": "final", "remote_branch": "two"},
+            ],
         )
 
         self.assertIn("_branch_url", manifest["integration_evidence"])
@@ -283,13 +291,189 @@ class SubmitterTests(unittest.TestCase):
             MODULE.validate_integration_evidence(
                 Path.cwd(),
                 manifest,
-                [{"_tip": "first"}, {"_tip": "final"}],
+                [
+                    {"_tip": "first", "remote_branch": "one"},
+                    {"_tip": "final", "remote_branch": "two"},
+                ],
             )
         evidence["partial_merge_safety"]["validated_prefixes"] = 2
         with self.assertRaisesRegex(MODULE.SubmitError, "prefix tips"):
             MODULE.validate_integration_evidence(
-                Path.cwd(), manifest, [{"_tip": "changed"}, {"_tip": "final"}]
+                Path.cwd(),
+                manifest,
+                [
+                    {"_tip": "changed", "remote_branch": "one"},
+                    {"_tip": "final", "remote_branch": "two"},
+                ],
             )
+
+    def test_integration_evidence_rejects_stale_or_unsupported_claims(self) -> None:
+        cases = (
+            ("branch drift", None, None, ["a" * 40, "c" * 40], True, "a" * 40,
+             "report", "branch drifted from its recorded commit"),
+            ("non-descendant", None, None, None, False, "a" * 40,
+             "report", "does not descend from the final stack layer"),
+            ("unpublished", None, None, None, True, "c" * 40,
+             "report", "is not published at its recorded commit"),
+            ("report", None, None, None, True, "a" * 40,
+             "unsubstantiated", "report does not substantiate"),
+            ("build status", ("builds", 0, "status"), "failed", None, True, "a" * 40,
+             "report", "build 1 did not pass"),
+            ("digest", ("builds", 0, "sha256"), "not-a-digest", None, True, "a" * 40,
+             "report", "build 1 requires a SHA-256 digest"),
+            ("flag", ("partial_merge_safety", "feature_flag", "safe_default"), "enabled",
+             None, True, "a" * 40, "report", "feature flag must default to disabled"),
+        )
+        complete_report = (
+            "# Stacked Validation Evidence\n\n"
+            "- Test command: `uv run pytest`\n"
+            "- Final tests: 42 passed, 1 skipped, 0 warnings\n"
+            "- Prefix coverage: 2/2\n"
+            "- Feature flag: `FEATURE_X_ENABLED`; default: `disabled`\n\n"
+            "- Disabled behavior: the disabled path does not initialize the feature\n\n"
+            "| Target | Tip | Result | Tests |\n"
+            "| --- | --- | --- | --- |\n"
+            "| `one` | `first` | passed | 42 passed, 1 skipped, 0 warnings |\n"
+            "| `two` | `final` | passed | 42 passed, 1 skipped, 0 warnings |\n\n"
+            "| Artifact | Result | SHA-256 |\n"
+            "| --- | --- | --- |\n"
+            f"| `feature_x-1.0.0-py3-none-any.whl` | passed | `{'b' * 64}` |\n"
+        )
+        for name, path, value, resolutions, ancestor, published, report, message in cases:
+            with self.subTest(name=name):
+                evidence = json.loads(json.dumps({
+                    key: item for key, item in self.evidence.items()
+                    if not key.startswith("_")
+                }))
+                if path:
+                    target = evidence
+                    for component in path[:-1]:
+                        target = target[component]
+                    target[path[-1]] = value
+                manifest = {
+                    "repository": "example.test/owner/repo",
+                    "publish_remote": "origin",
+                    "_head_repository": "example.test/contributor/repo",
+                    "integration_evidence": evidence,
+                }
+                resolve = mock.patch.object(
+                    MODULE, "resolve",
+                    side_effect=resolutions,
+                    return_value="a" * 40,
+                )
+                with resolve, mock.patch.object(
+                    MODULE, "is_ancestor", return_value=ancestor
+                ), mock.patch.object(
+                    MODULE, "remote_sha", return_value=published
+                ), mock.patch.object(
+                    MODULE, "git",
+                    return_value=complete_report if report == "report" else report,
+                ), self.assertRaisesRegex(MODULE.SubmitError, message):
+                    MODULE.validate_integration_evidence(
+                        Path.cwd(),
+                        manifest,
+                        [
+                            {"_tip": "first", "remote_branch": "one"},
+                            {"_tip": "final", "remote_branch": "two"},
+                        ],
+                    )
+
+    def test_integration_evidence_checks_each_report_contract_independently(self) -> None:
+        evidence = {key: value for key, value in self.evidence.items() if not key.startswith("_")}
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "publish_remote": "origin",
+            "_head_repository": "example.test/contributor/repo",
+            "integration_evidence": evidence,
+        }
+        report = (
+            "- Test command: `uv run pytest`\n"
+            "- Final tests: 42 passed, 1 skipped, 0 warnings\n"
+            "- Prefix coverage: 2/2\n"
+            "- Feature flag: `FEATURE_X_ENABLED`; default: `disabled`\n"
+            "- Disabled behavior: the disabled path does not initialize the feature\n"
+            "| `one` | `first` | passed | 42 passed, 1 skipped, 0 warnings |\n"
+            "| `two` | `final` | passed | 42 passed, 1 skipped, 0 warnings |\n"
+            f"| `feature_x-1.0.0-py3-none-any.whl` | passed | `{'b' * 64}` |\n"
+        )
+        cases = (
+            ("token bag", " ".join((evidence["test_command"], "42 passed, 1 skipped, 0 warnings", "2/2",
+                                    "FEATURE_X_ENABLED", "first", "final", "feature_x-1.0.0-py3-none-any.whl", "b" * 64))),
+            ("command", report.replace("`uv run pytest`", "`other`", 1)),
+            ("tests", report.replace("- Final tests:", "- Other tests:", 1)),
+            ("coverage", report.replace("- Prefix coverage:", "- Other coverage:", 1)),
+            ("flag", report.replace("- Feature flag:", "- Other flag:", 1)),
+            ("summary", report.replace("- Disabled behavior:", "- Other behavior:", 1)),
+            ("prefix", report.replace("| `one` | `first` | passed | 42 passed, 1 skipped, 0 warnings |\n", "")),
+            ("later prefix", report.replace("| `two` | `final` | passed | 42 passed, 1 skipped, 0 warnings |\n", "")),
+            ("build", report.replace(f"| `feature_x-1.0.0-py3-none-any.whl` | passed | `{'b' * 64}` |\n", "")),
+            ("final contradiction", report + "- Final tests: 1 failed\n"),
+            ("contradiction", report + "| `one` | `first` | passed | 41 passed, 1 failed |\n"),
+        )
+        for name, invalid_report in cases:
+            with self.subTest(name=name), mock.patch.object(MODULE, "resolve", return_value="a" * 40), \
+                    mock.patch.object(MODULE, "is_ancestor", return_value=True), \
+                    mock.patch.object(MODULE, "remote_sha", return_value="a" * 40), \
+                    mock.patch.object(MODULE, "git", return_value=invalid_report), \
+                    self.assertRaisesRegex(MODULE.SubmitError, "does not substantiate"):
+                MODULE.validate_integration_evidence(
+                    Path.cwd(), manifest, [{"_tip": "first", "remote_branch": "one"},
+                                           {"_tip": "final", "remote_branch": "two"}],
+                )
+
+    def test_verify_pull_request_rejects_removed_or_drifted_evidence_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [
+                dict(layer, _tip=str(index + 1) * 40, _body_file=body_file)
+                for index, layer in enumerate(self.layers)
+            ]
+            links = {
+                0: {"number": 41, "url": "https://example.test/pull/41"},
+                1: {"number": 42, "url": "https://example.test/pull/42"},
+            }
+            manifest = {
+                "repository": "example.test/owner/repo",
+                "default_base": "main",
+                "feature_name": "Feature X",
+                "feature_summary": "Focused change.",
+                "stack_label": "feature-x",
+                "_head_owner": "contributor",
+                "integration_evidence": self.evidence,
+            }
+            expected = MODULE.render_body(
+                layers, links, 1, "main", "Focused change.", "feature-x",
+                self.evidence, "contributor", "Feature X"
+            )
+            marker = "\n\n## Stack validation and partial-merge safety"
+            navigation = "\n\n" + MODULE.MARKER
+            before, remainder = expected.split(marker, 1)
+            _, after = remainder.split(navigation, 1)
+            bodies = {
+                "removed": before + navigation + after,
+                "drifted": expected.replace("42 passed", "41 passed", 1),
+            }
+            for name, body in bodies.items():
+                with self.subTest(name=name), mock.patch.object(
+                    MODULE,
+                    "gh_api",
+                    return_value=json.dumps({
+                        "state": "open", "draft": True,
+                        "title": MODULE.stacked_title(layers[1], 1, 2, "feature-x"),
+                        "base": {"ref": "main"},
+                        "head": {
+                            "ref": layers[1]["remote_branch"],
+                            "sha": layers[1]["_tip"],
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": body,
+                    }),
+                ), self.assertRaisesRegex(MODULE.SubmitError, "PR body drifted"):
+                    MODULE.verify_pull_request(
+                        Path.cwd(), manifest, layers, links, 1, layers[1], "main",
+                        {"number": 42}, True
+                    )
 
     def test_stacked_title_inserts_position_after_conventional_prefix(self) -> None:
         self.assertEqual(

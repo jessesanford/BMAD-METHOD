@@ -337,15 +337,35 @@ def validate_integration_evidence(
     if feature_flag["safe_default"].casefold() != "disabled":
         raise SubmitError("partial_merge_safety feature flag must default to disabled")
 
-    required_report_content = (
-        evidence["test_command"],
-        f"{tests['passed']} passed, {tests['skipped']} skipped, {tests['warnings']} warnings",
-        f"{validated}/{total}",
-        feature_flag["name"],
-        *prefix_tips,
-        *(value for build in builds for value in (build["artifact"], build["sha256"])),
+    report_lines = {line.strip() for line in report.splitlines()}
+    required_report_lines = (
+        f"- Test command: `{evidence['test_command']}`",
+        f"- Final tests: {tests['passed']} passed, {tests['skipped']} skipped, {tests['warnings']} warnings",
+        f"- Prefix coverage: {validated}/{total}",
+        f"- Feature flag: `{feature_flag['name']}`; default: `{feature_flag['safe_default']}`",
+        f"- Disabled behavior: {feature_flag['disabled_behavior']}",
     )
-    if any(value not in report for value in required_report_content):
+    prefix_rows_match = all(
+        len(re.findall(
+            rf"(?m)^\|\s*`{re.escape(layer['remote_branch'])}`\s*\|\s*`{re.escape(tip)}`\s*\|\s*passed\s*\|\s*[1-9]\d* passed, \d+ skipped, \d+ warnings\s*\|$",
+            report,
+        )) == 1
+        for layer, tip in zip(layers, prefix_tips)
+    )
+    build_rows_match = all(
+        len(re.findall(
+            rf"(?m)^\|\s*`{re.escape(build['artifact'])}`\s*\|\s*passed\s*\|\s*`{build['sha256']}`\s*\|$",
+            report,
+        )) == 1
+        for build in builds
+    )
+    contradictory_result = re.search(r"(?im)(?:\d+\s+(?:failed|errors?)|^\|.*\|\s*(?:skipped|cancelled|timed out)\s*\|)", report)
+    if (
+        any(line not in report_lines for line in required_report_lines)
+        or not prefix_rows_match
+        or not build_rows_match
+        or contradictory_result
+    ):
         raise SubmitError("committed integration report does not substantiate the manifest evidence")
 
     web_url = repository_web_url(manifest["_head_repository"])
