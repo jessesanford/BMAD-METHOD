@@ -35,8 +35,11 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
 <workflow>
 
 <step n="1" goal="Establish a representable legacy GitHub stack">
-  <action>Require a clean worktree, a green PR-ready integration result, immutable target SHAs, the
-  ordered PR-ready layers with the planning layer first, and a fresh fetch of every candidate remote.</action>
+  <action>Require a clean worktree, immutable target SHAs, the ordered PR-ready layers with the
+  planning layer first, and a fresh fetch of every candidate remote. Require a published integration
+  evidence branch whose exact commit descends from the final layer and contains a committed validation
+  report. The report must record the exact test command and counts, successful distribution builds
+  with artifact hashes, and an explicit prefix-by-prefix partial-merge result.</action>
   <action>Enumerate local Git remotes and resolve each repository and default branch. Ask the user
   which remote should receive the PRs, recommending `upstream` when it exists and `origin` otherwise.
   Then ask which branch on that remote should be the first PR's base, recommending that remote's
@@ -70,12 +73,17 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   `<prefix>(stacked-pr: <keywords> [N/X]): <subject>`. Write a feature summary and body per layer.
   The plan explains feature, split, order, validation, and reviewer path. Implementation PRs link it
   and state scope, prerequisite, validation, and risk without repeating the design.</action>
+  <action>Every body must link the published integration branch and immutable validation report,
+  state the exact test result and built artifacts, and explain why each dependency-ordered partial
+  merge is safe. When safety relies on a feature flag, name it, prove it defaults disabled, and state
+  that the disabled path does not import or initialize the gated runtime.</action>
 </step>
 
 <step n="3" goal="Create a fail-closed submission manifest">
   <action>Write the schema in `references/submission-manifest.md`. Use upstream-hosted `remote_branch`
-  names for every layer and exact local `tip` SHAs. The first PR targets upstream main; every later PR
-  targets the prior layer's remote branch.</action>
+  names for every layer and exact local `tip` SHAs. Include the required structured
+  `integration_evidence`; unsupported prose claims are not a substitute. The first PR targets upstream
+  main; every later PR targets the prior layer's remote branch.</action>
   <action>Run
   `uv run {skill-root}/scripts/submit_pr_stack.py &lt;manifest&gt; --dry-run --output &lt;journal&gt;`.
   Review titles, bases, heads, SHAs, bodies, table, and graph; add `--verbose` for sanitized commands
@@ -119,7 +127,8 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
 
 <step n="5" goal="Prove the reviewer experience and hand off safely">
   <action>Query every submitted PR and verify: expected repository, exact head SHA, expected base,
-  correct open/draft state, planning link, complete navigation graph, and no unexpected cumulative diff.</action>
+  correct open/draft state, planning link, complete navigation graph, integration branch and immutable
+  report links, exact test/build evidence, feature-flag safety statement, and no unexpected cumulative diff.</action>
   <action>For automatic submission, report the planning PR first, then a table of every PR number,
   clickable URL, base/head branch, source SHA, and status. For manual submission, do not invent a PR
   summary; report the package, instructions, title/body files, manifest, links file, and journal paths.</action>
