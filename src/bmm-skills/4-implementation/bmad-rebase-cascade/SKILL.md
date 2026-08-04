@@ -1,11 +1,11 @@
 ---
 name: bmad-rebase-cascade
-description: 'Stacked-PR projects only: refresh the whole story-branch stack against upstream, cascading a rebase through every branch in order. Use when the user says "rebase the stack", "cascade rebase the stories", or after an epic lands and the stack may be stale.'
+description: 'Stacked-PR projects only: refresh the planning/story source stack against upstream, cascading a rebase through every branch in order. Use when the user says "rebase the stack", "cascade rebase the stories", or after an epic lands and the stack may be stale.'
 ---
 
 # Rebase Cascade Workflow
 
-**Goal:** Keep a stacked-PR story-branch chain fresh against the real upstream, without ever
+**Goal:** Keep a stacked-PR planning/story source chain fresh against the real upstream, without ever
 force-rewriting the default branch or silently resolving a conflict that needs a human decision.
 
 **Your Role:** Developer performing routine stack maintenance — mechanical, not creative. There is
@@ -77,10 +77,21 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
 </check>
 </step>
 
-<step n="2" goal="Resolve the upstream-of-record and fetch it">
-  <action>Determine the rebase remote: run `git remote get-url upstream` — if it succeeds, the rebase remote is `upstream` (the canonical/shared repo a fork stays in sync with); otherwise it's `origin`. Never push to `upstream` in this workflow, only fetch from it.</action>
-  <action>Determine the repo's real default branch: `git symbolic-ref --short refs/remotes/origin/HEAD` (strip the `origin/` prefix), falling back to `main` if that's empty.</action>
-  <action>Fetch it fresh: `git fetch <rebase-remote> <default-branch>`.</action>
+<step n="2" goal="Resolve the base authority and source host">
+  <action>Require a clean worktree and no merge, rebase, cherry-pick, or revert in progress before
+  fetching or moving any ref.</action>
+  <action>Require both `upstream` and `origin`. The upstream default branch is the immutable base authority;
+  `origin` is the only publication remote for source story/planning branches. Missing either remote
+  is a hard preflight failure, and the roles must never be substituted.</action>
+  <action>Resolve the canonical default branch from `refs/remotes/upstream/HEAD`, refreshing it with
+  `git remote set-head upstream -a` when necessary. Fail closed if it remains unresolved; do not
+  substitute origin's default or assume a branch name.</action>
+  <action>Fetch it fresh: `git fetch upstream &lt;default-branch&gt;`, then fetch the exact origin
+  source heads selected by the project's branching rule.</action>
+  <action>Before rebasing, verify every selected story/planning source head is present on origin at
+  its recorded SHA and absent from upstream. Apply the same exact-origin/absent-upstream check to
+  every integration, review, evidence, or backup source ref recorded by the project workflows.
+  Sanitized `*-pr-ready` component heads are the only non-default release refs allowed upstream.</action>
   <action>Report which remote and branch you resolved to the user before doing anything destructive.</action>
 </step>
 
@@ -97,11 +108,17 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
 </check>
 </step>
 
-<step n="4" goal="Enumerate the current story-branch stack">
-  <action>List every stacked story branch: `git branch -a --list 'feat/*/story-*'`, sorted by epic number then story number (this is the exact chain order the stack was built in — each branch is based on the one before it, and an epic's first story is based on the previous epic's last story, not on the default branch).</action>
+<step n="4" goal="Enumerate the current source-branch stack">
+  <action>Use the project's stacked-branching rule to enumerate planning and story refs from local
+  and origin namespaces. Normalize remote prefixes, de-duplicate, and order them by the topology in
+  that rule. Do not invent a filename pattern when the project defines another convention. A source
+  stack may exist only on origin; local-only enumeration is forbidden.</action>
+  <action>For each normalized branch, fetch its exact origin counterpart. Create a local ref when
+  only origin exists. When both exist, fast-forward local if behind, retain local if ahead, and
+  fail closed if they diverged; never replace newer origin work during the later push.</action>
 
 <check if="no such branches exist">
-  HALT: "No `feat/*/story-*` branches found — nothing to cascade. (The default branch itself is
+  HALT: "No stacked planning/story source branches found — nothing to cascade. (The default branch itself is
   already fast-forwarded to `<rebase-remote>/<default-branch>`.)"
 </check>
 
@@ -112,11 +129,13 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
   <action>Starting from `prev_old = old_base`, `prev_new = new_base` (Step 3), process each branch in stack order:</action>
 
   1. Record its current tip: `branch_old = $(git rev-parse <branch>)`.
-  2. `git rebase --onto <prev_new> <prev_old> <branch>` — this replays only the commits unique to
+  2. Require `git merge-base --is-ancestor <prev_old> <branch_old>`. If false, HALT: the enumerated
+     refs are a malformed stack and `rebase --onto` must not reinterpret the layer.
+  3. `git rebase --onto <prev_new> <prev_old> <branch>` — this replays only the commits unique to
      `<branch>` (relative to its own previous parent state, `prev_old`) onto the freshly-rebased
      `prev_new`.
-  3. Record its new tip: `branch_new = $(git rev-parse <branch>)`.
-  4. Set `prev_old = branch_old`, `prev_new = branch_new` for the next branch in the stack.
+  4. Record its new tip: `branch_new = $(git rev-parse <branch>)`.
+  5. Set `prev_old = branch_old`, `prev_new = branch_new` for the next branch in the stack.
 
 <check if="any rebase in this loop conflicts">
   `git rebase --abort` immediately. Do NOT attempt to resolve the conflict yourself — per this
@@ -130,9 +149,16 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
   <action>Track a running table of `branch | old SHA | new SHA | status` as you go — you'll present this at the end.</action>
 </step>
 
-<step n="6" goal="Push the rebased branches back to origin">
-  <action>For every branch that was successfully rebased in Step 5, best-effort push it: `git push --force-with-lease origin <branch>`. Never push to `upstream`.</action>
-  <action>A push failure (offline, permissions, no `gh` auth) must NOT be treated as a workflow failure — the rebase itself already succeeded locally. Log it clearly in the final report as "rebased locally, not yet pushed" so the user can push it manually.</action>
+<step n="6" goal="Push the rebased source branches back to origin">
+  <action>For every successfully rebased branch, first record the exact current origin SHA with
+  `git ls-remote --heads origin refs/heads/&lt;branch&gt;`, then push the immutable local SHA with
+  `git push --force-with-lease=refs/heads/&lt;branch&gt;:&lt;observed-sha-or-empty&gt; origin
+  &lt;new-sha&gt;:refs/heads/&lt;branch&gt;`. Verify origin resolves to exactly `new-sha`. Never publish
+  a source story/planning branch to `upstream` or use an unqualified lease.</action>
+  <check if="any source branch lease, push, or remote-SHA verification fails">
+    HALT needs-attention. Publication is blocking for PR-ready/submission progression; never continue
+    with stale origin source heads even when the local rebase succeeded.
+  </check>
 </step>
 
 <step n="7" goal="Report the outcome">

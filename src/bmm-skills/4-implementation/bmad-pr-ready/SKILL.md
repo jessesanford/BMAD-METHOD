@@ -36,8 +36,9 @@ exclude local process artifacts, create safety refs, and push with exact leases.
 <workflow>
 
 <step n="1" goal="Establish immutable source and target topology">
-  <action>Require a clean worktree and the project's stacked-branching rule. Fetch the upstream
-  default branch and the fork remote. Never rewrite a source implementation branch.</action>
+  <action>Require a clean worktree and the project's stacked-branching rule. Fetch the canonical
+  upstream default branch and every origin source head. Never rewrite a source implementation
+  branch or publish one to upstream.</action>
   <action>Enumerate the planning branch separately when it is parallel to Story 1. Enumerate story
   branches in stack order and record each branch's real source parent and exact tip SHA.</action>
   <action>Create a run directory beneath the repository Git directory:
@@ -79,10 +80,21 @@ exclude local process artifacts, create safety refs, and push with exact leases.
 </step>
 
 <step n="5" goal="Create and optionally publish the PR-ready refs">
-  <action>After the dry run and human-visible review are clean, rerun the builder with `--apply`.
-  Add `--push` only when the user authorized updates to the configured fork remote.</action>
-  <action>The builder must create timestamped safety refs for replaced targets and use exact
-  force-with-lease protection. Never push to the upstream remote in this workflow.</action>
+  <action>After the dry run and human-visible review are clean, rerun the builder with `--apply
+  --push`. Only sanitized PR-ready feature-head hosting is authorized on upstream independently of
+  final PR creation or readiness; dry-run submission requires these exact remote heads.</action>
+  <action>The builder must create timestamped local safety refs for replaced targets and use exact
+  force-with-lease protection. Validate every effective `remote.upstream.pushurl` against the
+  canonical fetch repository. In a fork release, the manifest base/publish remote must be `upstream`
+  and its source remote must be `origin`; verify every source tip on origin, and never publish
+  PR-ready heads to origin or a fork. Single-repository projects may use one repository for all
+  roles. Refuse to replace a target used
+  by any open or closed PR without explicit
+  human authorization; this workflow provides no automatic bypass.</action>
+  <check if="any lease, push, remote-SHA verification, push-URL, or existing-PR-head check fails">
+    HALT needs-attention. Do not continue to release validation or submission with stale upstream
+    heads.
+  </check>
 </step>
 
 <step n="6" goal="Validate the PR-ready stack as the submitted product">
