@@ -119,6 +119,9 @@ jobs:
       - name: Test sprint-planning scripts
         run: npm run test:sprint-planning
 
+      - name: Test stacked-PR scripts
+        run: npm run test:stacked-pr
+
       - name: Validate file references
         run: npm run validate:refs
 
