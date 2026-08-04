@@ -218,6 +218,9 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
 <step n="7" goal="Workflow Completion">
   <action>Summarize: `{scope_epic}` (and everything beneath it), the integration branch name, the
   functional-test summary, and the review outcome.</action>
+  <action>If this run leaves behind the new best cumulative stack branch and the stack is still not in
+  `main`, recommend refreshing the clean local anchor branch with `bmad-stack-working-branch` before
+  any new Copilot/BMAD issue work begins.</action>
   <action>Report workflow completion to user with personalized message: "Integration review
   complete, {user_name}!"</action>
   <action>Run: `python3 {project-root}/_bmad/scripts/resolve_customization.py --skill {skill-root} --key workflow.on_complete` — if the resolved value is non-empty, follow it as the final terminal instruction before exiting.</action>

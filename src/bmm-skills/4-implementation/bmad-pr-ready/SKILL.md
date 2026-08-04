@@ -93,6 +93,9 @@ exclude local process artifacts, create safety refs, and push with exact leases.
   owning source story branch, followed by a fresh PR-ready rebuild.</action>
   <action>Report source/target SHAs, commit-boundary decisions, exclusions, safety refs, push results,
   manifest/report paths, and integration outcome.</action>
+  <action>Clarify that `-pr-ready` branches are upstream review artifacts, not the default starting
+  point for new interim issue work. When the stack is still unmerged, direct the user to
+  `bmad-stack-working-branch` for the clean local anchor branch that should seed future work.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
 

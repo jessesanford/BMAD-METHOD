@@ -159,6 +159,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>Explain merge order: land PRs strictly from 1 through N. After each merge, refresh later PRs
   so GitHub recalculates their diffs. If prerequisite changes remain, stop and restack the remaining
   heads before review. Never delete publish-remote head branches until their PRs merge or close.</action>
+  <action>If the stack remains unmerged after submission, recommend `bmad-stack-working-branch` as
+  the default way to provision or refresh the clean local anchor branch for new interim work. Do not
+  suggest starting fresh issue work from `main` or directly on a review-only `-pr-ready` branch.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
 
