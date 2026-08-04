@@ -123,6 +123,10 @@ problem is a PR metadata issue or a real branch-topology issue.
   evidence/integration head, stays draft, and presents the full stack diff against the default branch.</action>
   <action>Report which PRs were updated, which superseded drafts were closed, whether any rebase was
   actually required, and where the rendered artifacts and update manifest were stored.</action>
+  <action>When the canonical integration/validation head changed, direct the user to refresh the
+  clean anchor branch with `bmad-stack-working-branch` before starting new interim work. The default
+  start point for fresh Copilot/BMAD issue work should follow the full stack culmination, not a stale
+  prep branch or one component PR-ready branch.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
 
