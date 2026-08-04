@@ -51,7 +51,7 @@
     "test:site-url": "node test/test-site-url.mjs",
     "test:skills": "node test/test-validate-skills.js",
     "test:sprint-planning": "uv run --python 3.11 src/bmm-skills/plan/bmad-sprint-planning/scripts/tests/test_sprint_plan.py && node test/test-template-sync.js",
-    "test:stacked-pr": "uv run --python 3.11 src/bmm-skills/ship/bmad-rebase-cascade/scripts/tests/test_skill_invariants.py && uv run --python 3.11 src/bmm-skills/ship/bmad-integration-review/scripts/tests/test_skill_invariants.py",
+    "test:stacked-pr": "uv run --python 3.11 src/bmm-skills/ship/bmad-rebase-cascade/scripts/tests/test_skill_invariants.py && uv run --python 3.11 src/bmm-skills/ship/bmad-integration-review/scripts/tests/test_skill_invariants.py && uv run --python 3.11 src/bmm-skills/ship/bmad-pr-ready/scripts/tests/test_build_pr_ready_stack.py && uv run --python 3.11 src/bmm-skills/ship/bmad-pr-ready/scripts/tests/test_collect_stack_evidence.py && uv run --python 3.11 src/bmm-skills/ship/bmad-pr-ready/scripts/tests/test_produce_validation_evidence.py",
     "test:urls": "node test/test-parse-source-urls.js",
     "validate:refs": "node tools/validate-file-refs.js --strict",
     "validate:skills": "node tools/validate-skills.js --strict"
