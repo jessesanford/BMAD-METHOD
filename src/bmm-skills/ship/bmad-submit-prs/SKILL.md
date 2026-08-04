@@ -195,6 +195,9 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   that step GitHub would merge the next PR into the predecessor branch. Refresh later PRs so GitHub
   recalculates their diffs, and stop if any prerequisite changes remain. Never delete publish-remote
   head branches until their PRs merge or close.</action>
+  <action>If the stack remains unmerged after submission, recommend `bmad-stack-working-branch` as
+  the default way to provision or refresh the clean local anchor branch for new interim work. Do not
+  suggest starting fresh issue work from `main` or directly on a review-only `-pr-ready` branch.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
 
