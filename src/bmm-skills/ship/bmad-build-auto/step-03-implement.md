@@ -13,6 +13,14 @@
 
 Verify `{spec_file}` resolves to a non-empty path and the file exists on disk. If empty or missing, HALT with status `blocked` and blocking condition `missing spec_file before implementation`.
 
+### Branch precondition
+
+Before writing any file, confirm the current branch is a disposable working branch that this run may commit to.
+
+Treat a branch as **not writable** when it is the default branch (`main`/`master`), a shared stack anchor such as `prep/stack-working`, an already-published stack layer branch, or a review artifact (`*-pr-ready`, `integration/*`, `release/*`). These are shared refs: committing to them silently rewrites what reviewers and dependent projects are pointing at.
+
+If the current branch is not writable, create a new working branch from the current HEAD and switch to it before making any changes, and name that branch in the run report. Never reset, rebase, or force-push the shared branch to work around this. If the branch cannot be created, HALT with status `blocked` and blocking condition `unwritable branch before implementation`.
+
 ## INSTRUCTIONS
 
 ### Baseline
