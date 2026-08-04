@@ -96,6 +96,13 @@ problem is a PR metadata issue or a real branch-topology issue.
   incremental merges.</action>
   <action>Update the combined validation PR so it links the full component chain, stays draft, and
   clearly says it is for full-stack CI/evidence only and not for code review or merging.</action>
+  <critical>Extending the stack changes what "the full stack" means, so the existing integration branch
+  no longer composes it and its recorded evidence no longer covers the tree under review. Recut a NEW
+  integration branch from the new final component head, positioned at the end of the enlarged chain,
+  and re-run the integration and release validation against that composed tree. Do not rebase the old
+  integration branch in place, and never carry a pre-extension validation report forward to describe a
+  tree that now contains additional layers — that presents untested code as validated. Delegate the
+  composition and re-validation to `bmad-integration-review`.</critical>
   <action>If the integration PR's GitHub base branch is what makes the diff look partial, retarget it
   to the true default branch instead of rewriting a graph that is already correct.</action>
 </step>
@@ -104,6 +111,10 @@ problem is a PR metadata issue or a real branch-topology issue.
   <action>Identify drafts or audit PRs that are now superseded by the enlarged canonical stack or by
   the current integration/validation PR. Close them with an explanation pointing reviewers at the
   surviving canonical PR(s).</action>
+  <action>Retire the previous integration/validation PR and stop referencing its branch once the recut
+  replacement is live and its validation has actually been re-run. Close it with a comment naming the
+  replacement PR and the new integration head. Never delete the superseded branch: the closed PR is the
+  durable record of what the smaller stack validated, and deleting it destroys that audit trail.</action>
   <action>Never close the active component stack or the canonical validation PR as "superseded". Only
   retire PRs whose purpose has been fully replaced and whose continued presence would distract or
   confuse reviewers.</action>

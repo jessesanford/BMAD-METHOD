@@ -161,8 +161,40 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
   </check>
 </step>
 
-<step n="7" goal="Report the outcome">
+<step n="7" goal="Recut the integration and evidence branches on the rebased stack">
+  <action>A cascade rewrites every component SHA, so any integration, validation, or release-evidence
+  branch built from the previous stack now composes commits that no longer exist on the live lineage.
+  Treat those branches as derived artifacts of a specific stack revision, never as long-lived branches
+  to be updated in place: the evidence they carry attests to a tree that has been replaced.</action>
+  <action>Enumerate every derived branch produced from the pre-cascade stack — integration/cumulative
+  branches, validation-evidence branches, and any permanently-draft combined-stack PR that points at
+  one. Record for each its old head and the PR that publishes it, so nothing is silently abandoned.</action>
+  <action>Cut a NEW derived branch from the rebased final component head rather than rebasing the old
+  one. Give it a fresh revision-scoped name (for example a UTC-stamped suffix) so the superseded branch
+  and its evidence remain immutably inspectable while the review moves on. The new integration branch
+  must descend from the new final component head and sit at the end of the rebuilt chain.</action>
+  <critical>Re-run the integration and release validation against the newly composed tree. Evidence is a
+  claim that a specific tree passed specific commands; copying, editing, or re-dating a pre-cascade
+  report to match the new head fabricates proof. If the validation cannot be re-run now, say so and
+  leave the stack without fresh evidence rather than presenting stale evidence as current.</critical>
+  <action>Retire the superseded artifacts only after the replacements are live: close the old
+  combined-stack/validation PR with a comment naming the replacement PR and the new integration head,
+  and stop referencing the old branch from component PR bodies. Never delete the superseded branch —
+  the closed PR must remain readable as the record of what was previously validated.</action>
+  <check if="a derived branch carries unique commits that are not reachable from any component branch">
+    HALT needs-attention. Recutting would silently drop that work. Report the branch and the unique
+    commits, and ask whether they belong in a component layer, before creating any replacement.
+  </check>
+  <action>Delegate the actual re-validation and composition to `bmad-integration-review` rather than
+  reimplementing it here; this step owns deciding that a rebuild is required and that the old artifacts
+  must be retired.</action>
+</step>
+
+<step n="8" goal="Report the outcome">
   <action>Present the full `branch | old SHA | new SHA | status` table from Step 5, plus the push result from Step 6 for each branch.</action>
+  <action>Report the recut derived branches from Step 7: each old integration/evidence head, its
+  replacement head, whether validation was re-run against the new tree, and which superseded PRs were
+  closed.</action>
   <action>If everything cascaded and pushed cleanly, tell the user the stack is fresh and safe to continue implementation or run `bmad-integration-review` on.</action>
   <action>If the rebased stack is still in the interim pre-merge phase, recommend immediately refreshing the clean anchor branch with `bmad-stack-working-branch` so future Copilot/BMAD sessions start from the new cumulative stack tip rather than stale `main` or a review-only component branch.</action>
   <action>A cascade rewrites every branch in the stack, so every SHA another repository pinned is now
