@@ -119,8 +119,17 @@ jobs:
       - name: Test sprint-planning scripts
         run: npm run test:sprint-planning
 
+      - name: Test architecture scripts
+        run: npm run test:architecture
+
+      - name: Test project-context scripts
+        run: npm run test:project-context
+
       - name: Test stacked-PR scripts
         run: npm run test:stacked-pr
+
+      - name: Validate skill test registration
+        run: npm run validate:test-registration
 
       - name: Validate file references
         run: npm run validate:refs
