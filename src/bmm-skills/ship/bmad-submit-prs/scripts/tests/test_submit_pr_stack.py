@@ -1168,6 +1168,61 @@ class SubmitterTests(unittest.TestCase):
                         {"number": 42}, True, expected
                     )
 
+    def test_pr_111_fallback_headings_are_exact_and_ordered(self) -> None:
+        template = Path(
+            MODULE.__file__
+        ).parents[1] / "references" / "pr-111-fallback-template.md"
+        content = template.read_text(encoding="utf-8")
+        MODULE.validate_fallback_body(content, label="fallback")
+        with self.assertRaisesRegex(MODULE.SubmitError, "exactly once"):
+            MODULE.validate_fallback_body(
+                content + "\n## Summary\n\nDuplicate.\n",
+                label="fallback",
+            )
+        swapped = content.replace(
+            "## Motivation and context", "## TEMP", 1
+        ).replace("## Changes", "## Motivation and context", 1).replace(
+            "## TEMP", "## Changes", 1
+        )
+        with self.assertRaisesRegex(MODULE.SubmitError, "order"):
+            MODULE.validate_fallback_body(swapped, label="fallback")
+        with self.assertRaisesRegex(MODULE.SubmitError, "exactly the seven"):
+            MODULE.validate_fallback_body(
+                content + "\n## Extra\n\nNot canonical.\n",
+                label="fallback",
+            )
+        MODULE.validate_fallback_body(
+            content + "\n## Generated appendix\n",
+            label="rendered fallback",
+            allow_appendix_headings=True,
+        )
+        fenced = "\n".join(f"```\n{heading}\n```" for heading in MODULE.FALLBACK_HEADINGS)
+        with self.assertRaisesRegex(MODULE.SubmitError, "exactly once"):
+            MODULE.validate_fallback_body(fenced, label="fallback")
+        commented = "\n".join(
+            f"<!-- {heading} -->" for heading in MODULE.FALLBACK_HEADINGS
+        )
+        with self.assertRaisesRegex(MODULE.SubmitError, "exactly once"):
+            MODULE.validate_fallback_body(commented, label="fallback")
+        missing_check = content.replace(
+            "- [ ] The change is scoped to this PR and prerequisites are identified.\n",
+            "",
+        )
+        with self.assertRaisesRegex(MODULE.SubmitError, "checklist item"):
+            MODULE.validate_fallback_body(missing_check, label="fallback")
+        with self.assertRaisesRegex(MODULE.SubmitError, "another Markdown heading style"):
+            MODULE.validate_fallback_body(
+                content + "\nSummary\n-------\n\nDuplicate.\n",
+                label="fallback",
+            )
+        checklist = "\n".join(f"- [ ] {item}" for item in MODULE.FALLBACK_CHECKLIST_ITEMS)
+        misplaced = content.replace(
+            f"## Checklist\n\n{checklist}",
+            f"{checklist}\n\n## Checklist",
+        )
+        with self.assertRaisesRegex(MODULE.SubmitError, "under '## Checklist'"):
+            MODULE.validate_fallback_body(misplaced, label="fallback")
+
     def test_stacked_title_inserts_position_after_conventional_prefix(self) -> None:
         self.assertEqual(
             MODULE.stacked_title(
