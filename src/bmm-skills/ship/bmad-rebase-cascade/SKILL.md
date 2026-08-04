@@ -165,6 +165,12 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
   <action>Present the full `branch | old SHA | new SHA | status` table from Step 5, plus the push result from Step 6 for each branch.</action>
   <action>If everything cascaded and pushed cleanly, tell the user the stack is fresh and safe to continue implementation or run `bmad-integration-review` on.</action>
   <action>If the rebased stack is still in the interim pre-merge phase, recommend immediately refreshing the clean anchor branch with `bmad-stack-working-branch` so future Copilot/BMAD sessions start from the new cumulative stack tip rather than stale `main` or a review-only component branch.</action>
+  <action>A cascade rewrites every branch in the stack, so every SHA another repository pinned is now
+  orphaned on a rewritten lineage. Identify any dependent repository that pins this one by revision
+  (git dependency pins, submodule SHAs, lockfiles, vendored copies, embedded revisions in evidence)
+  and report that each must be repointed at the new head while this stack is unmerged and unreleased.
+  Follow the pointer-sync contract in `bmad-stack-working-branch`; do not leave a dependent pinned to
+  a pre-cascade commit, and do not update a pin by editing a lockfile revision by hand.</action>
   <action>Report workflow completion to user with personalized message: "Rebase cascade complete, {user_name}!"</action>
   <action>Run: `python3 {project-root}/_bmad/scripts/resolve_customization.py --skill {skill-root} --key workflow.on_complete` — if the resolved value is non-empty, follow it as the final terminal instruction before exiting.</action>
 </step>

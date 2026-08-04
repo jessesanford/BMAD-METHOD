@@ -102,12 +102,51 @@ current integration/validation tip.
   after provisioning it, but keep the anchor branch itself clean.</action>
 </step>
 
-<step n="5" goal="Report the anchor state">
+<step n="5" goal="Sync dependent project pointers to the moved head">
+  <action>Determine whether any other repository depends on this one by revision while this stack is
+  still unmerged. Look for git dependency pins, submodule SHAs, lockfiles, vendored copies, image
+  tags, and any recorded evidence or docs that embed the revision.</action>
+  <check if="no other repository pins this one by revision">
+    Skip this step. Pointer sync only matters while a dependent must track an unreleased head.
+  </check>
+  <action>State the rule: while the depended-upon stack is not merged into the default branch and not
+  part of an official release, every dependent must point at the **current canonical head**, not at
+  whatever commit it was pinned to when it was last touched.</action>
+  <action>Resolve the new head with the same evidence used in step 2, then confirm the commit is
+  reachable from that canonical head before pinning it.</action>
+  <check if="the currently pinned commit survives only on an archived or rewritten branch">
+    Report it as an orphaned pin. A rebase cascade or stack extension rewrote the lineage, so the
+    dependent is building against a commit no live branch contains. It must be moved to the
+    equivalent commit on the canonical head, not left as-is.
+  </check>
+  <action>Update the pointer and regenerate any lockfile in the same change, so the pin and the
+  resolution never disagree. Regenerate lockfiles with the project's own tooling; never hand-edit or
+  search-and-replace the revision. A new head can move package versions and dependency sets, not just
+  the SHA, and substitution silently produces a lockfile that pins a version the revision does not
+  declare.</action>
+  <check if="recorded evidence, release notes, or validation artifacts embed the old revision">
+    Those artifacts assert that a validation ran against a specific revision. Regenerate them by
+    re-running that validation against the new head. Never rewrite them to claim a run that did not
+    happen, and never bump the pointer alone and leave the evidence asserting the old revision.
+  </check>
+  <check if="the dependent project has its own unmerged stack">
+    It needs its own anchor branch before the pointer bump lands. Run this workflow in that
+    repository too, and make the bump on a working branch off its anchor — never as a commit on the
+    anchor itself.
+  </check>
+  <check if="the pointer bump requires source changes beyond the pointer itself">
+    HALT and report. A bump that needs code changes is a migration, not a pointer sync, and it should
+    be scoped and reviewed as its own change.
+  </check>
+</step>
+
+<step n="6" goal="Report the anchor state">
   <action>Report:
   - the resolved culmination ref and SHA,
   - the anchor branch name,
   - whether it was created, unchanged, or fast-forwarded,
   - whether a shared `origin` mirror exists,
+  - any dependent project whose pointer was updated, or still needs updating,
   - and the rule that this is the default branch to start future interim chats from until the stack merges into `main`.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>

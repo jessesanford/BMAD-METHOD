@@ -114,6 +114,10 @@ exclude local process artifacts, create safety refs, and push with exact leases.
   <action>Clarify that `-pr-ready` branches are upstream review artifacts, not the default starting
   point for new interim issue work. When the stack is still unmerged, direct the user to
   `bmad-stack-working-branch` for the clean local anchor branch that should seed future work.</action>
+  <action>Curating these branches produces new commits, so any dependent repository that pins this
+  one by revision is now behind. Report which pointers must move to the current canonical head while
+  this stack is unmerged and unreleased, and never point a dependent at a `-pr-ready` branch as if it
+  were the stack head. Follow the pointer-sync contract in `bmad-stack-working-branch`.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
 

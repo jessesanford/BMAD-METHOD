@@ -127,6 +127,9 @@ problem is a PR metadata issue or a real branch-topology issue.
   clean anchor branch with `bmad-stack-working-branch` before starting new interim work. The default
   start point for fresh Copilot/BMAD issue work should follow the full stack culmination, not a stale
   prep branch or one component PR-ready branch.</action>
+  <action>When the head changed and another repository pins this one by revision, report that those
+  pointers must move to the new head while this stack is unmerged and unreleased, and follow the
+  pointer-sync contract in `bmad-stack-working-branch`.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
 
