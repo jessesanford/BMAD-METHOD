@@ -198,6 +198,11 @@ publishes exact branch tips, creates or updates PRs idempotently, and cross-link
   <action>If the stack remains unmerged after submission, recommend `bmad-stack-working-branch` as
   the default way to provision or refresh the clean local anchor branch for new interim work. Do not
   suggest starting fresh issue work from `main` or directly on a review-only `-pr-ready` branch.</action>
+  <action>Before declaring the stack submitted, verify that every dependent repository that pins this
+  one by revision points at the head just published, for as long as this stack is unmerged and
+  unreleased. Submission is the last checkpoint before reviewers and downstream builds consume the
+  stack, so a pointer left on a superseded commit means they validate something the stack no longer
+  contains. Follow the pointer-sync contract in `bmad-stack-working-branch`.</action>
   <action>Run the resolved `{workflow.on_complete}` when non-empty.</action>
 </step>
 

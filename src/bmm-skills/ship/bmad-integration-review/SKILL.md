@@ -234,6 +234,11 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
   <action>If this run leaves behind the new best cumulative stack branch and the stack is still not in
   `main`, recommend refreshing the clean local anchor branch with `bmad-stack-working-branch` before
   any new Copilot/BMAD issue work begins.</action>
+  <action>The integration branch is the head dependent repositories usually pin, so rebuilding it
+  moves that pointer target. When another repository pins this one by revision, report that it must
+  be repointed at the rebuilt integration head while this stack is unmerged and unreleased, and that
+  any evidence embedding the old revision must be regenerated rather than edited. Follow the
+  pointer-sync contract in `bmad-stack-working-branch`.</action>
   <action>Report workflow completion to user with personalized message: "Integration review
   complete, {user_name}!"</action>
   <action>Run: `python3 {project-root}/_bmad/scripts/resolve_customization.py --skill {skill-root} --key workflow.on_complete` — if the resolved value is non-empty, follow it as the final terminal instruction before exiting.</action>
