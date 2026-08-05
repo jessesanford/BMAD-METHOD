@@ -102,6 +102,54 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
   <action>Strongly recommend running the **bmad-rebase-cascade** skill first if it hasn't been run very recently — validating a stale, unrebased stack produces a review of code that's about to change anyway. If the user confirms the stack is already fresh (e.g. `bmad-rebase-cascade` just ran), proceed without re-running it.</action>
 </step>
 
+<critical>
+The cumulative integration branch is the single authoritative green gate — the **only** branch
+whose checks must be fully green. Its entire
+purpose is to prove one claim: *once every branch in this stack is merged into the default branch in
+the order its PRs describe, the resulting combined changeset passes.*
+
+An individual mid-stack layer is NOT required to be green. A layer routinely fails its own checks for
+a purely logical reason — it uses a dependency, module, fixture, migration, or config that a LATER
+layer in the same stack introduces. That is expected and correct in a stacked chain, not a defect.
+
+Never restructure the stack to chase a mid-stack green: do not move dependency declarations to earlier
+layers, do not pull version/pin bumps forward, do not reorder layers, and do not add skips or guards
+purely to silence such a failure. All of that rewrites already-reviewed layers, invalidates approvals,
+and changes what reviewers agreed to, in exchange for a signal that was never the gate.
+
+Before "fixing" any failing check, classify it:
+
+- **Later-layer dependency** (the thing it needs arrives further up the stack) → leave it alone; the
+  integration branch is where it must pass. Note it in the PR body so reviewers aren't surprised.
+- **Genuine defect** (real bug, flaky/non-deterministic test, test coupled to ambient developer
+  config, failure that would persist even with the whole stack merged) → fix it, at its owning layer.
+- **Partial-merge hazard** (the layer would break the default branch the moment it merges on its own,
+  in the order its PR describes) → fix it, at the earliest layer that can carry the fix.
+
+The first class never justifies touching the stack. The other two do.
+
+The partial-merge class is narrow and easy to over-apply, so establish it with evidence, never with
+a hunch. It only exists when the stack merges into the default branch incrementally, PR by PR, while
+review is still in progress — the usual case, because reviews land at different times. Apply this
+exact test:
+
+1. Confirm the stack is based directly on the default branch, so merging a layer makes the default
+   branch's tree *equal to that layer's tree* rather than a merge of divergent work.
+2. Check out that layer in a **pristine worktree** and run the default branch's own required checks
+   with the exact commands CI uses.
+3. If they fail, the default branch will fail the same way the moment that PR merges.
+
+A red check on a layer nobody has merged is a cosmetic signal. A red check on the default branch
+blocks every other team working in the repository, and no feature flag protects against it — a flag
+gates runtime behavior, not an import, a lockfile, a migration, or a build step. That is the whole
+distinction: mid-stack green was never the gate, but the default branch always is.
+
+When this class is confirmed, pulling a declaration or pin bump earlier is the correct fix rather
+than the prohibited one, because it is no longer buying a green checkmark — it is keeping the default
+branch releasable. Say so explicitly in the PR body and in the cascade report, so reviewers can see
+which class was invoked and check the reasoning.
+</critical>
+
 <step n="3" goal="Rebuild a disposable cumulative integration branch">
   <action>Enumerate every `feat/*/story-*` branch: `git branch -a --list 'feat/*/story-*'`, sorted by epic number then story number, filtered to epic number `<= {scope_epic}`.</action>
   <action>Resolve the stack's true base: `git merge-base` of the FIRST (lowest epic.story) filtered branch against the repo's default branch.</action>
