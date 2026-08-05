@@ -52,6 +52,29 @@ problem is a PR metadata issue or a real branch-topology issue.
   across every still-relevant component PR.</critical>
 </step>
 
+<critical>
+**Default-branch freshness invariant.** Per-layer and integration validation are only valid against
+the exact default-branch commit the stack was cascaded onto. The default branch keeps moving while
+reviews are in flight, so that evidence goes stale on someone else's merge, not on any change of
+yours.
+
+Therefore: **re-cascade onto the current default-branch head, and re-validate, before stack review,
+before submitting or refreshing PR bodies, and before merging.** Treat a cascade as expiring the
+moment the default branch advances past the base it recorded.
+
+Enforce it mechanically rather than by memory:
+- Record the default-branch base SHA the cascade ran against in the cascade report, the integration
+  PR body, and any validation evidence artifact.
+- Before review/submit/merge, compare that recorded SHA against the live default-branch head. If they
+  differ, the stack is stale: re-cascade and re-validate before proceeding.
+- Never present per-layer green earned on a stale base as current evidence, and never restate a prior
+  run's pass counts as if they still hold.
+
+This is a standing invariant, not a one-time fix. A stack held open across many reviews will need
+this repeatedly; that recurring cost is a reason to land lower layers promptly rather than hold the
+whole chain open.
+</critical>
+
 <step n="2" goal="Determine whether the problem is metadata or graph topology">
   <action>Check the actual ancestry of the component heads and the integration/evidence branch before
   rewriting anything. Distinguish:

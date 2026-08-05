@@ -99,8 +99,40 @@ Activation is complete. If `activation_steps_prepend` or `activation_steps_appen
 </step>
 
 <step n="2" goal="Make sure the stack is fresh before validating it">
-  <action>Strongly recommend running the **bmad-rebase-cascade** skill first if it hasn't been run very recently — validating a stale, unrebased stack produces a review of code that's about to change anyway. If the user confirms the stack is already fresh (e.g. `bmad-rebase-cascade` just ran), proceed without re-running it.</action>
+  <action>Resolve the live default-branch head and compare it against the base SHA the stack was last
+  cascaded onto (from the cascade report, integration PR body, or validation evidence). This is a
+  gate, not a recommendation: reviewing a stack whose base has moved reviews code that is about to
+  change, and its per-layer evidence no longer describes any tree that will exist after merge.</action>
+
+<check if="the live default-branch head differs from the recorded cascade base, or no base SHA was recorded">
+  HALT and run **bmad-rebase-cascade** first, then re-validate every layer, then return here. Do not
+  proceed on the strength of a prior run's pass counts — they were earned against a base that no
+  longer exists. Only skip when the recorded base SHA equals the live default-branch head.
+</check>
 </step>
+
+<critical>
+**Default-branch freshness invariant.** Per-layer and integration validation are only valid against
+the exact default-branch commit the stack was cascaded onto. The default branch keeps moving while
+reviews are in flight, so that evidence goes stale on someone else's merge, not on any change of
+yours.
+
+Therefore: **re-cascade onto the current default-branch head, and re-validate, before stack review,
+before submitting or refreshing PR bodies, and before merging.** Treat a cascade as expiring the
+moment the default branch advances past the base it recorded.
+
+Enforce it mechanically rather than by memory:
+- Record the default-branch base SHA the cascade ran against in the cascade report, the integration
+  PR body, and any validation evidence artifact.
+- Before review/submit/merge, compare that recorded SHA against the live default-branch head. If they
+  differ, the stack is stale: re-cascade and re-validate before proceeding.
+- Never present per-layer green earned on a stale base as current evidence, and never restate a prior
+  run's pass counts as if they still hold.
+
+This is a standing invariant, not a one-time fix. A stack held open across many reviews will need
+this repeatedly; that recurring cost is a reason to land lower layers promptly rather than hold the
+whole chain open.
+</critical>
 
 <critical>
 The cumulative integration branch is the single authoritative green gate — the **only** branch
