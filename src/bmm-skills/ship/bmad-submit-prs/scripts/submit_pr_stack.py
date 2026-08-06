@@ -475,6 +475,22 @@ def validate_repository_template_body(
             )
 
 
+def origin_review_required(manifest: dict[str, Any]) -> bool:
+    """Whether the fork-hosted origin-preview audit ceremony applies.
+
+    Origin review (and the downstream regenerate/reseal apply-request ceremony in
+    prepare_upstream_submission.py) exists to bridge a two-repository gap: a fork-hosted
+    preview stack is audited first, then a *second*, regenerated package binding that audit
+    is what actually gets applied to the real upstream target. When evidence_remote/
+    evidence_repository already resolve to the exact target repository (single-repo,
+    direct-to-upstream submission, no fork involved), there is no preview repository to
+    audit and no gap to bridge: the one canonical --dry-run already runs against the real
+    target, so --approved-dry-run-journal alone (binding the exact reviewed manifest/body/
+    title bytes) is a complete, adequate human-approval gate on its own.
+    """
+    return bool(manifest["_evidence_cross_repository"])
+
+
 def validate_origin_review_approval(
     repo: Path,
     manifest_path: Path,
@@ -1657,7 +1673,7 @@ def validate_approved_dry_run(
         or journal.get("base_sha") != manifest["base_sha"]
         or journal.get("stack_label") != manifest["stack_label"]
         or journal.get("template_source") != manifest["template_source"]
-        or journal.get("origin_review") != manifest["_origin_review"]
+        or journal.get("origin_review") != manifest.get("_origin_review")
     ):
         raise SubmitError("approved dry-run journal does not match the regenerated manifest")
     recorded_layers = journal.get("layers")
@@ -2681,7 +2697,7 @@ def submit(
     manifest = load_manifest(manifest_path)
     configure_command_environment(manifest["repository"])
     layers = validate(repo, manifest_path, manifest)
-    if (apply or manual) and "_origin_review" not in manifest:
+    if (apply or manual) and origin_review_required(manifest) and "_origin_review" not in manifest:
         raise SubmitError(
             "upstream apply is blocked until origin review is staged, audited, "
             f"and explicitly approved with {ORIGIN_REVIEW_APPROVAL_PHRASE!r}; "
@@ -2705,7 +2721,7 @@ def submit(
             approved_dry_run,
             output,
         )
-        if apply or manual
+        if (apply or manual) and origin_review_required(manifest)
         else None
     )
     prior_progress = (
@@ -3007,24 +3023,31 @@ def submit(
         journal["status"] = "dry-run"
         write_journal(output, journal)
         return journal
-    refreshed_approval = validate_sealed_apply_request(
-        repo,
-        approved_apply_request,
-        manifest_path,
-        approved_dry_run,
-        output,
+    refreshed_approval = (
+        validate_sealed_apply_request(
+            repo,
+            approved_apply_request,
+            manifest_path,
+            approved_dry_run,
+            output,
+        )
+        if origin_review_required(manifest)
+        else None
     )
     if refreshed_approval != apply_approval:
         raise SubmitError("sealed apply approval changed before mutation")
     verify_published_layers(repo, manifest, layers)
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     verify_published_evidence(repo, manifest)
     for index, layer in enumerate(layers):
         progress("publish", f"{index + 1}/{len(layers)}: {layer['remote_branch']}")
         publish(repo, manifest, layer)
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
-    for index, layer in enumerate(layers):
+    if origin_review_required(manifest):
         validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    for index, layer in enumerate(layers):
+        if origin_review_required(manifest):
+            validate_origin_review_approval(repo, manifest_path, manifest, layers)
         base = component_base(layers, index, manifest["default_base"])
         existing = layer.get("_existing_pr")
         title = stacked_title(layer, index, len(layers), manifest["stack_label"])
@@ -3053,7 +3076,8 @@ def submit(
         write_journal(output, journal)
 
     combined = manifest["_integration_layer"]
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     verify_published_evidence(repo, manifest)
     combined_body = approved_integration_body
     existing_combined = manifest.get("_existing_integration_pr")
@@ -3141,7 +3165,8 @@ def submit(
     verify_published_evidence(repo, manifest)
     validate_release_branch_placement(repo, manifest, layers)
 
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     for index in range(len(layers)):
         finalize_draft_state(repo, manifest, links[index])
 
@@ -3166,7 +3191,8 @@ def submit(
         integration_pr,
         approved_integration_body,
     )
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     journal["status"] = "complete"
     write_journal(output, journal)
     return journal

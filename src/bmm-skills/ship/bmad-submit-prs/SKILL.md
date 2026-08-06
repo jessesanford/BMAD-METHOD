@@ -129,7 +129,8 @@ whole chain open.
   `uv run {skill-root}/scripts/submit_pr_stack.py &lt;manifest&gt; --dry-run --output &lt;journal&gt;`.
   Review titles, bases, heads, SHAs, bodies, table, and graph; add `--verbose` for sanitized commands
   and per-layer progress.</action>
-  <critical>In fork-to-upstream topology, this first canonical dry run is input to origin review
+  <critical>In fork-to-upstream topology (`evidence_remote`/`evidence_repository` resolve to a
+  different repository than the target), this first canonical dry run is input to origin review
   only. Create a complete namespaced origin component stack plus a separate permanent-draft
   **DO NOT MERGE** integration-proof PR at the exact evidence SHA. Audit heads, bases, bodies,
   evidence SHA, and draft state live on origin, then stop for human review.</critical>
@@ -140,6 +141,14 @@ whole chain open.
   source body before regenerating the manifest and dry-run journal. Seal it with `--mode seal`.
   The submitter must re-query every live origin PR and reject drift. Never reuse the
   pre-origin-review package or stale receipts.</action>
+  <action>In single-repository topology (`evidence_remote`/`evidence_repository` already resolve
+  to the exact target repository — no fork involved), there is no origin preview to stage or
+  audit: this canonical dry run already runs against the real target. Origin review and the
+  prepare/seal apply-request ceremony do not apply and must not be required; the human reviews
+  this one dry run's rendered titles/bodies/table/graph directly, then that reviewed
+  `--output` journal is passed back as `--approved-dry-run-journal` to `--apply`/`--manual` — the
+  same binding-by-exact-content-hash guarantee, without a second regenerate-and-reseal round
+  trip.</action>
   <check if="authentication, push permission, target SHA, ancestry, upstream remote identity, or an existing PR conflicts">
     Report the exact failed invariant before branch publication or PR creation. Ask the user to
     correct upstream state or stop safely; never choose another target or silently flatten the stack.
@@ -171,18 +180,24 @@ whole chain open.
     automatic-submission actions below.
   </check>
   <check if="the user chose automatic submission">
-  <action>After origin review approval and approval of the regenerated human-visible upstream dry
-  run, run the script with `--apply`. In fork topology the script rejects apply unless
-  `origin_review` binds the exact audited origin receipt and approval phrase. Stop again for human
-  review of the regenerated package, require `approve regenerated upstream dry run`, and validate
-  its apply request with `prepare_upstream_submission.py --mode validate-apply`.
-  Pass both `--approved-dry-run-journal` and `--approved-apply-request` to automatic or manual
-  submission. The submitter independently revalidates that sealed request and current source/PR-ready
-  placement immediately before mutation, submits the reviewed title/body bytes exactly, and places live
-  PR navigation in comments rather than rewriting approved bodies. It then preflights
-  all remote and GitHub invariants before side effects, publishes exact SHAs to the publish remote with
-  force-with-lease, and creates every PR against its per-layer base. Create new PRs as drafts so
-  none becomes reviewable before its warning and links are complete.</action>
+  <action>In fork topology, continue only after origin review approval and approval of the
+  regenerated human-visible upstream dry run, then run the script with `--apply`. The script
+  rejects apply unless `origin_review` binds the exact audited origin receipt and approval
+  phrase. Stop again for human review of the regenerated package, require
+  `approve regenerated upstream dry run`, and validate its apply request with
+  `prepare_upstream_submission.py --mode validate-apply`. Pass both `--approved-dry-run-journal`
+  and `--approved-apply-request` to automatic or manual submission.</action>
+  <action>In single-repository topology, there is no origin preview and no regenerate/reseal
+  round trip: after the human reviews the one canonical dry run, run the script with `--apply`
+  and `--approved-dry-run-journal` pointing at that reviewed `--output` journal.
+  `--approved-apply-request` is not required and is ignored (the prepare/seal ceremony is
+  fork-only). The submitter independently revalidates the approved dry-run journal and current
+  source/PR-ready placement immediately before mutation, submits the reviewed title/body bytes
+  exactly, and places live PR navigation in comments rather than rewriting approved bodies. It
+  then preflights all remote and GitHub invariants before side effects, publishes exact SHAs to
+  the publish remote with force-with-lease, and creates every PR against its per-layer base.
+  Create new PRs as drafts so none becomes reviewable before its warning and links are
+  complete.</action>
   <action>Reuse an open PR only when head and base match; refuse closed, duplicate, or mismatched state.
   Persist after each success. Retry transient reads and idempotent writes with bounded backoff, but
   leave ambiguous creates to an idempotent rerun that reconciles remote state from the journal.</action>

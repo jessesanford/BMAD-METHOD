@@ -500,6 +500,86 @@ class SubmitterTests(unittest.TestCase):
                 manual_links=None,
             )
 
+    def test_origin_review_required_reflects_evidence_topology(self) -> None:
+        self.assertTrue(
+            MODULE.origin_review_required({"_evidence_cross_repository": True})
+        )
+        self.assertFalse(
+            MODULE.origin_review_required({"_evidence_cross_repository": False})
+        )
+
+    @mock.patch.object(MODULE, "configure_command_environment")
+    @mock.patch.object(MODULE, "validate", return_value=[])
+    @mock.patch.object(
+        MODULE,
+        "load_manifest",
+        return_value={
+            "repository": "example.test/upstream/repo",
+            "_evidence_cross_repository": False,
+        },
+    )
+    def test_single_repo_apply_skips_origin_review_but_still_requires_approved_dry_run(
+        self,
+        _load_mock: mock.Mock,
+        _validate_mock: mock.Mock,
+        _configure_mock: mock.Mock,
+    ) -> None:
+        """Direct-to-upstream (non-fork) submissions have no preview repository to audit,
+        so the origin-review ceremony must not block --apply. --approved-dry-run-journal
+        remains mandatory and is the sole human-approval gate in this topology."""
+        with self.assertRaisesRegex(
+            MODULE.SubmitError, "requires --approved-dry-run-journal"
+        ):
+            MODULE.submit(
+                Path.cwd(),
+                Path("manifest.json"),
+                apply=True,
+                manual=False,
+                output=None,
+                rendered_dir=None,
+                manual_links=None,
+            )
+
+    @mock.patch.object(MODULE, "github_preflight", side_effect=RuntimeError("reached preflight"))
+    @mock.patch.object(MODULE, "validate_sealed_apply_request")
+    @mock.patch.object(MODULE, "configure_command_environment")
+    @mock.patch.object(MODULE, "validate", return_value=[])
+    @mock.patch.object(MODULE, "validate_approved_dry_run", return_value={"ok": True})
+    @mock.patch.object(
+        MODULE,
+        "load_manifest",
+        return_value={
+            "repository": "example.test/upstream/repo",
+            "_evidence_cross_repository": False,
+        },
+    )
+    def test_single_repo_apply_never_invokes_sealed_apply_request(
+        self,
+        _load_mock: mock.Mock,
+        _approved_dry_run_mock: mock.Mock,
+        _validate_mock: mock.Mock,
+        _configure_mock: mock.Mock,
+        sealed_request_mock: mock.Mock,
+        _preflight_mock: mock.Mock,
+    ) -> None:
+        """The fork-only prepare/seal apply-request ceremony (backed by
+        prepare_upstream_submission.py) must never run for a single-repo submission,
+        even when a stray --approved-apply-request happens to be passed. Execution must
+        instead proceed past both fork-only gates straight into the normal preflight path."""
+        with self.assertRaisesRegex(RuntimeError, "reached preflight"):
+            MODULE.submit(
+                Path.cwd(),
+                Path("manifest.json"),
+                apply=True,
+                manual=False,
+                output=None,
+                rendered_dir=None,
+                manual_links=None,
+                approved_dry_run=Path("dry-run.json"),
+                approved_apply_request=Path("apply-request.json"),
+            )
+        sealed_request_mock.assert_not_called()
+
     def test_only_integration_layer_uses_origin_fork_head(self) -> None:
         manifest = {
             "_head_owner": "upstream-owner",
