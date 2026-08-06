@@ -84,9 +84,25 @@ whole chain open.
 </step>
 
 <step n="3" goal="Remove local process machinery without losing upstream code">
-  <action>Exclude newly introduced `_bmad/**`, `_bmad-output/**`, `.agents/**`, `.claude/**`,
-  `.cursor/**`, orchestration logs, generated review reports, and source prompts/specs that are not
-  intended upstream changes. Never delete a matching path that already exists in the upstream base.</action>
+  <action>`_bmad/**` and `_bmad-output/**` are exclusively this repo's local BMAD process
+  machinery (planning/implementation-artifact scratch state). They are **never** legitimate upstream
+  content under any circumstance. Exclude them from every PR-ready layer unconditionally — this
+  exclusion is absolute and does NOT fall under the "already exists in the upstream base" carve-out
+  below. If a prior PR-ready build ever leaked one of these paths into an already-published
+  `-pr-ready` branch or the upstream default branch itself, that is a bug to fix by removing it now,
+  not a precedent to preserve. Also exclude orchestration logs, generated review reports, and source
+  prompts/specs that are not intended upstream changes, using the same unconditional rule.</action>
+  <action>`.agents/**`, `.claude/**`, `.cursor/**` are treated differently: some target repos
+  intentionally vendor agent-guidance projections upstream. For these paths only, exclude newly
+  introduced content but never delete a matching path that already exists in the upstream base.</action>
+  <action>Before dropping any excluded path, search the tracked (non-excluded) source tree for real
+  inbound references to it — imports, build/config file paths, doc links, or other content that is
+  used by or points at a file under `_bmad/**` or `_bmad-output/**`. If such a reference exists, the
+  referenced artifact is not disposable process scratch; relocate it into an appropriate
+  non-underscore-prefixed location that matches the project's established convention (e.g. `docs/`,
+  or a source directory the referencing code/doc already lives in), update the referencing path(s)
+  accordingly, and only then drop the rest of the excluded directory. Record every relocation
+  (old path, new path, referencing file) in the manifest/report.</action>
   <action>If the planning layer would become empty, write one concise upstream-facing design document
   in the run directory and add it as a manifest overlay under the project's established docs convention.</action>
   <action>Make the planning PR-ready branch the stack root when it will be submitted first. Build Story
@@ -144,6 +160,11 @@ the gate; the default branch always is.
 <step n="6" goal="Validate the PR-ready stack as the submitted product">
   <action>Verify every target ends in `-pr-ready`, forms one ancestry chain from upstream, contains no
   newly introduced excluded path, and matches the sanitized source deltas plus declared overlays.</action>
+  <action>Additionally assert, as a hard unconditional invariant regardless of any prior history:
+  `git ls-tree -r --name-only &lt;target&gt;` contains zero paths matching `_bmad/**` or `_bmad-output/**`
+  for every PR-ready target in the stack. This check has no "already existed upstream" exception —
+  fail closed and report the offending branch/path if it ever matches, rather than treating a past
+  leak as acceptable baseline.</action>
   <action>Define strict argv-only tests, builds/artifact globs, and default/disabled feature-flag
   checks in an evidence config. Run `python3 {skill-root}/scripts/produce_validation_evidence.py
   &lt;applied-report&gt; &lt;config&gt; --repo {project-root} --branch &lt;evidence-branch&gt;`.

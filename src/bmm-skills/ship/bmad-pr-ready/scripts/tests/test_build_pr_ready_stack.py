@@ -104,6 +104,85 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "show", f"{target}:src/feature.py"), "two")
         self.assertNotIn("_bmad/state.md", git(self.repo, "ls-tree", "-r", "--name-only", target))
 
+    def test_hard_excludes_bmad_paths_without_manifest_opt_in(self) -> None:
+        """_bmad/** and _bmad-output/** must be stripped even when exclude_paths omits them."""
+        git(self.repo, "switch", "-qc", "story")
+        tip = self.commit(
+            "implementation",
+            {
+                "src/feature.py": "one\n",
+                "_bmad/state.md": "local\n",
+                "_bmad-output/implementation-artifacts/9-1.md": "scratch\n",
+            },
+        )
+        manifest = {
+            "schema_version": 1,
+            "base": self.base,
+            "base_remote": "upstream",
+            "base_branch": "main",
+            "source_remote": "origin",
+            "remote": "upstream",
+            "exclude_paths": [],
+            "layers": [
+                {
+                    "source": "story",
+                    "source_tip": tip,
+                    "source_parent": self.base,
+                    "target": "story-pr-ready",
+                    "decision_summary": "one outcome",
+                    "groups": [
+                        {"through": tip, "message": "feat: clean feature", "novelty_rationale": "only outcome"}
+                    ],
+                }
+            ],
+        }
+        path = self.run_dir / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        result = MODULE.build(self.repo, path, apply=True, push=False)
+        target = result["layers"][0]["new_tip"]
+        tree = git(self.repo, "ls-tree", "-r", "--name-only", target)
+        self.assertNotIn("_bmad/state.md", tree)
+        self.assertNotIn("_bmad-output/implementation-artifacts/9-1.md", tree)
+        self.assertIn("src/feature.py", tree)
+
+    def test_hard_excludes_bmad_paths_even_if_already_in_base(self) -> None:
+        """_bmad/** must be stripped even where the manifest excludes carve-out for
+        already-upstream paths would otherwise preserve it."""
+        self.commit("pre-existing bmad artifact on base", {"_bmad-output/legacy.md": "leaked\n"})
+        git(self.repo, "push", "-q", "upstream", "HEAD:refs/heads/main")
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+        base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "switch", "-qc", "story")
+        tip = self.commit("implementation", {"src/feature.py": "one\n"})
+        manifest = {
+            "schema_version": 1,
+            "base": base,
+            "base_remote": "upstream",
+            "base_branch": "main",
+            "source_remote": "origin",
+            "remote": "upstream",
+            "exclude_paths": [],
+            "layers": [
+                {
+                    "source": "story",
+                    "source_tip": tip,
+                    "source_parent": base,
+                    "target": "story-pr-ready",
+                    "decision_summary": "one outcome",
+                    "groups": [
+                        {"through": tip, "message": "feat: clean feature", "novelty_rationale": "only outcome"}
+                    ],
+                }
+            ],
+        }
+        path = self.run_dir / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        result = MODULE.build(self.repo, path, apply=True, push=False)
+        target = result["layers"][0]["new_tip"]
+        tree = git(self.repo, "ls-tree", "-r", "--name-only", target)
+        self.assertNotIn("_bmad-output/legacy.md", tree)
+        self.assertIn("src/feature.py", tree)
+
     def test_preserves_independent_groups(self) -> None:
         git(self.repo, "switch", "-qc", "story")
         first = self.commit("schema", {"src/schema.py": "schema\n"})
