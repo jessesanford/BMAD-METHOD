@@ -24,6 +24,17 @@ class BuildError(RuntimeError):
     """A manifest or Git invariant failed."""
 
 
+# _bmad/** and _bmad-output/** are exclusively this repo's local BMAD process machinery
+# (planning/implementation-artifact scratch state) and are never legitimate upstream content.
+# Unlike manifest-supplied exclude_paths (which are exempt once a path already exists in the
+# upstream base, to avoid clobbering genuinely-upstream content that happens to match a pattern),
+# these are banned unconditionally: even if a prior flawed build already leaked one of these paths
+# into a published -pr-ready branch or the upstream default branch itself, that is a bug to fix now,
+# never a precedent that exempts future layers from the same check.
+HARD_EXCLUDE_DIRS = ("_bmad", "_bmad-output")
+HARD_EXCLUDE_PATTERNS = tuple(f"{d}/*" for d in HARD_EXCLUDE_DIRS)
+
+
 def run_git(repo: Path, *args: str, env: dict[str, str] | None = None, data: bytes | None = None) -> bytes:
     result = subprocess.run(
         ["git", *args],
@@ -141,7 +152,11 @@ def validate(repo: Path, manifest: dict[str, Any]) -> tuple[str, list[dict[str, 
 
 
 def apply_delta(repo: Path, env: dict[str, str], old: str, new: str, excludes: list[str]) -> None:
-    pathspec = [".", *(f":(exclude){item}" for item in excludes)]
+    pathspec = [
+        ".",
+        *(f":(exclude){item}" for item in excludes),
+        *(f":(exclude){d}" for d in HARD_EXCLUDE_DIRS),
+    ]
     patch = run_git(repo, "diff", "--binary", "--full-index", old, new, "--", *pathspec)
     if patch:
         run_git(repo, "apply", "--cached", "--3way", "--whitespace=nowarn", "-", env=env, data=patch)
@@ -297,6 +312,21 @@ def build(repo: Path, manifest_path: Path, apply: bool, push: bool) -> dict[str,
             for group_number, group in enumerate(layer["groups"]):
                 env = {"GIT_INDEX_FILE": str(Path(temporary) / f"index-{layer_number}-{group_number}")}
                 run_git(repo, "read-tree", tip, env=env)
+                # Actively strip any HARD_EXCLUDE_DIRS content inherited from parent_tip (e.g. a
+                # prior leaked _bmad-output artifact already baked into an earlier published
+                # PR-ready layer or the base itself) — not just newly-introduced diff content.
+                # Unlike manifest exclude_paths, these paths get no "already existed" exemption.
+                run_git(
+                    repo,
+                    "rm",
+                    "--cached",
+                    "-r",
+                    "--ignore-unmatch",
+                    "-q",
+                    "--",
+                    *HARD_EXCLUDE_DIRS,
+                    env=env,
+                )
                 apply_delta(repo, env, source_cursor, group["_through"], excludes)
                 overlay_paths = overlays(repo, env, group.get("overlays", []), manifest_path.parent)
                 tree = git_text(repo, "write-tree", env=env)
@@ -329,6 +359,16 @@ def build(repo: Path, manifest_path: Path, apply: bool, push: bool) -> dict[str,
             )
             if banned:
                 raise BuildError(f"{layer['target']} contains excluded paths: {banned}")
+            # Unconditional hard invariant: _bmad/** and _bmad-output/** must never appear in a
+            # PR-ready target, even if they already existed in the base (unlike the manifest
+            # excludes check above, there is no "already in upstream" exemption for these paths).
+            hard_banned = sorted(
+                path
+                for path in tree_paths(repo, tip)
+                if any(fnmatch.fnmatch(path, pattern) for pattern in HARD_EXCLUDE_PATTERNS)
+            )
+            if hard_banned:
+                raise BuildError(f"{layer['target']} contains banned BMAD process paths: {hard_banned}")
             if not is_ancestor(repo, parent_tip, tip):
                 raise BuildError(f"{layer['target']} is not based on its prior PR-ready layer")
             if tip == parent_tip:

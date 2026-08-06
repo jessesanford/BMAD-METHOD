@@ -10,6 +10,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 SCRIPT = Path(__file__).parents[1] / "submit_pr_stack.py"
@@ -62,6 +63,140 @@ class SubmitterTests(unittest.TestCase):
             "_branch_url": "https://example.test/tree/integration/feature-x",
             "_report_url": "https://example.test/blob/commit/docs/validation/feature-x.md",
         }
+
+    def write_dry_run_journal_fixture(
+        self,
+        directory: Path,
+        *,
+        existing_prs: dict[int, dict[str, Any]] | None = None,
+        existing_integration_pr: dict[str, Any] | None = None,
+    ) -> tuple[Path, dict[str, Any], list[dict[str, Any]], Path, dict[str, Any]]:
+        body = directory / "body.md"
+        body.write_text("## Summary\n\nLayer.\n", encoding="utf-8")
+        layers = [
+            {
+                "branch": f"stack/{name}-pr-ready",
+                "remote_branch": f"stack/{name}-pr-ready",
+                "_head_ref": f"stack/{name}-pr-ready",
+                "_tip": str(index + 1) * 40,
+                "_base_sha": "0" * 40 if index == 0 else str(index) * 40,
+                "_body_file": body,
+                "title": f"feat: {name}",
+                "summary": name,
+            }
+            for index, name in enumerate(("plan", "story-1.1", "story-1.2"))
+        ]
+        manifest = {
+            "repository": "github.example.com/upstream/repo",
+            "default_base": "main",
+            "base_sha": "0" * 40,
+            "feature_name": "Feature X",
+            "feature_summary": "Adds focused behavior.",
+            "stack_label": "feature-x",
+            "evidence_remote": "origin",
+            "template_source": ".github/PULL_REQUEST_TEMPLATE.md",
+            "integration_evidence": dict(self.evidence),
+            "_head_repository": "github.example.com/upstream/repo",
+            "_head_owner": "upstream",
+            "_evidence_owner": "fork-owner",
+            "_evidence_repository": "github.example.com/fork-owner/repo",
+            "_evidence_cross_repository": False,
+        }
+        manifest["_integration_layer"] = MODULE.integration_layer(manifest)
+        manifest_path = directory / "manifest.json"
+        manifest_path.write_text("{}\n", encoding="utf-8")
+        journal_path = directory / "approved-dry-run.json"
+        existing_prs = existing_prs or {}
+
+        def populate_preflight(
+            _repo: Path,
+            live_manifest: dict[str, Any],
+            live_layers: list[dict[str, Any]],
+        ) -> None:
+            for index, pr in existing_prs.items():
+                live_layers[index]["_existing_pr"] = dict(pr)
+            if existing_integration_pr is not None:
+                live_manifest["_existing_integration_pr"] = dict(existing_integration_pr)
+
+        with mock.patch.object(MODULE, "gh"), mock.patch.object(
+            MODULE, "create_pull_request"
+        ), mock.patch.object(MODULE, "publish"), mock.patch.object(
+            MODULE, "github_preflight", side_effect=populate_preflight
+        ), mock.patch.object(
+            MODULE, "configure_command_environment"
+        ), mock.patch.object(
+            MODULE, "validate", return_value=layers
+        ), mock.patch.object(
+            MODULE, "load_manifest", return_value=manifest
+        ):
+            journal = MODULE.submit(
+                directory,
+                manifest_path,
+                apply=False,
+                manual=False,
+                output=journal_path,
+                rendered_dir=directory / "rendered",
+                manual_links=None,
+            )
+        return manifest_path, manifest, layers, journal_path, journal
+
+    def reset_preflight_state(
+        self,
+        manifest: dict[str, Any],
+        layers: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        manifest_copy = dict(manifest)
+        manifest_copy["integration_evidence"] = dict(manifest["integration_evidence"])
+        manifest_copy.pop("_existing_integration_pr", None)
+        manifest_copy["integration_evidence"].pop("_integration_pr_url", None)
+        layers_copy = [dict(layer) for layer in layers]
+        for layer in layers_copy:
+            layer.pop("_existing_pr", None)
+        return manifest_copy, layers_copy
+
+    def build_apply_submit_fixture(
+        self,
+        directory: Path,
+    ) -> tuple[Path, dict[str, Any], list[dict[str, Any]], dict[str, str], dict[str, Any]]:
+        manifest_path = directory / "manifest.json"
+        manifest_path.write_text("{}\n", encoding="utf-8")
+        layers = [
+            {
+                "branch": "stack/plan-pr-ready",
+                "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "stack/plan-pr-ready",
+                "_tip": "1" * 40,
+                "_base_sha": "0" * 40,
+            }
+        ]
+        manifest = {
+            "repository": "github.example.com/upstream/repo",
+            "default_base": "main",
+            "base_sha": "0" * 40,
+            "stack_label": "feature-x",
+            "feature_name": "Feature X",
+            "feature_summary": "Adds focused behavior.",
+            "evidence_remote": "origin",
+            "integration_evidence": dict(self.evidence),
+            "_head_owner": "upstream",
+            "_head_repository": "github.example.com/upstream/repo",
+            "_evidence_owner": "fork-owner",
+            "_evidence_repository": "github.example.com/fork-owner/repo",
+            "_evidence_cross_repository": True,
+            "_origin_review": {"status": "approved"},
+        }
+        manifest["_integration_layer"] = MODULE.integration_layer(manifest)
+        approval = {
+            "apply_request": str(directory / "apply-request.json"),
+            "apply_request_sha256": "a" * 64,
+            "preparation_receipt": str(directory / "preparation-receipt.json"),
+            "preparation_receipt_sha256": "b" * 64,
+        }
+        approved_journal = {
+            "_approved_component_bodies": ["approved component body"],
+            "_approved_integration_body": "approved integration body",
+        }
+        return manifest_path, manifest, layers, approval, approved_journal
 
     def test_partial_navigation_links_prior_and_marks_future(self) -> None:
         rendered = MODULE.render_navigation(
@@ -500,6 +635,225 @@ class SubmitterTests(unittest.TestCase):
                 manual_links=None,
             )
 
+    def test_origin_review_required_reflects_evidence_topology(self) -> None:
+        self.assertTrue(
+            MODULE.origin_review_required({"_evidence_cross_repository": True})
+        )
+        self.assertFalse(
+            MODULE.origin_review_required({"_evidence_cross_repository": False})
+        )
+
+    @mock.patch.object(MODULE, "configure_command_environment")
+    @mock.patch.object(MODULE, "validate", return_value=[])
+    @mock.patch.object(
+        MODULE,
+        "load_manifest",
+        return_value={
+            "repository": "example.test/upstream/repo",
+            "_evidence_cross_repository": False,
+        },
+    )
+    def test_single_repo_apply_skips_origin_review_but_still_requires_approved_dry_run(
+        self,
+        _load_mock: mock.Mock,
+        _validate_mock: mock.Mock,
+        _configure_mock: mock.Mock,
+    ) -> None:
+        """Direct-to-upstream (non-fork) submissions have no preview repository to audit,
+        so the origin-review ceremony must not block --apply. --approved-dry-run-journal
+        remains mandatory and is the sole human-approval gate in this topology."""
+        with self.assertRaisesRegex(
+            MODULE.SubmitError, "requires --approved-dry-run-journal"
+        ):
+            MODULE.submit(
+                Path.cwd(),
+                Path("manifest.json"),
+                apply=True,
+                manual=False,
+                output=None,
+                rendered_dir=None,
+                manual_links=None,
+            )
+
+    @mock.patch.object(MODULE, "github_preflight", side_effect=RuntimeError("reached preflight"))
+    @mock.patch.object(MODULE, "validate_sealed_apply_request")
+    @mock.patch.object(MODULE, "configure_command_environment")
+    @mock.patch.object(MODULE, "validate", return_value=[])
+    @mock.patch.object(MODULE, "validate_approved_dry_run", return_value={"ok": True})
+    @mock.patch.object(
+        MODULE,
+        "load_manifest",
+        return_value={
+            "repository": "example.test/upstream/repo",
+            "_evidence_cross_repository": False,
+        },
+    )
+    def test_single_repo_apply_never_invokes_sealed_apply_request(
+        self,
+        _load_mock: mock.Mock,
+        _approved_dry_run_mock: mock.Mock,
+        _validate_mock: mock.Mock,
+        _configure_mock: mock.Mock,
+        sealed_request_mock: mock.Mock,
+        _preflight_mock: mock.Mock,
+    ) -> None:
+        """The fork-only prepare/seal apply-request ceremony (backed by
+        prepare_upstream_submission.py) must never run for a single-repo submission,
+        even when a stray --approved-apply-request happens to be passed. Execution must
+        instead proceed past both fork-only gates straight into the normal preflight path."""
+        with self.assertRaisesRegex(RuntimeError, "reached preflight"):
+            MODULE.submit(
+                Path.cwd(),
+                Path("manifest.json"),
+                apply=True,
+                manual=False,
+                output=None,
+                rendered_dir=None,
+                manual_links=None,
+                approved_dry_run=Path("dry-run.json"),
+                approved_apply_request=Path("apply-request.json"),
+            )
+        sealed_request_mock.assert_not_called()
+
+    def test_first_apply_with_existing_prs_skips_progress_reconcile_but_still_verifies(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, approval, approved_journal = (
+                self.build_apply_submit_fixture(directory)
+            )
+            output_path = directory / "apply-progress.json"
+
+            def populate_preflight(
+                _repo: Path,
+                live_manifest: dict[str, Any],
+                live_layers: list[dict[str, Any]],
+            ) -> None:
+                live_layers[0]["_existing_pr"] = {
+                    "number": 41,
+                    "url": "https://example.test/upstream/repo/pull/41",
+                }
+                live_manifest["_existing_integration_pr"] = {
+                    "number": 90,
+                    "url": "https://example.test/upstream/repo/pull/90",
+                }
+
+            with mock.patch.object(
+                MODULE, "load_manifest", return_value=manifest
+            ), mock.patch.object(
+                MODULE, "configure_command_environment"
+            ), mock.patch.object(
+                MODULE, "validate", return_value=layers
+            ), mock.patch.object(
+                MODULE, "validate_approved_dry_run", return_value=approved_journal
+            ), mock.patch.object(
+                MODULE, "validate_sealed_apply_request", return_value=approval
+            ), mock.patch.object(
+                MODULE, "github_preflight", side_effect=populate_preflight
+            ), mock.patch.object(
+                MODULE, "verify_pull_request"
+            ) as verify_pr_mock, mock.patch.object(
+                MODULE,
+                "verify_integration_pull_request",
+                side_effect=RuntimeError("verified live integration"),
+            ) as verify_integration_mock:
+                with self.assertRaisesRegex(
+                    RuntimeError, "verified live integration"
+                ):
+                    MODULE.submit(
+                        directory,
+                        manifest_path,
+                        apply=True,
+                        manual=False,
+                        output=output_path,
+                        rendered_dir=directory / "rendered",
+                        manual_links=None,
+                        approved_dry_run=directory / "approved-dry-run.json",
+                        approved_apply_request=directory / "approved-apply-request.json",
+                    )
+
+            self.assertFalse(output_path.exists())
+            self.assertEqual(verify_pr_mock.call_count, 1)
+            self.assertEqual(verify_pr_mock.call_args.args[7]["number"], 41)
+            self.assertEqual(verify_integration_mock.call_count, 1)
+            self.assertEqual(verify_integration_mock.call_args.args[4]["number"], 90)
+
+    def test_resume_apply_still_rejects_live_pr_drift_from_progress_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, approval, approved_journal = (
+                self.build_apply_submit_fixture(directory)
+            )
+            output_path = directory / "apply-progress.json"
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "status": "submitting",
+                        "manifest": str(manifest_path.resolve()),
+                        "manifest_sha256": MODULE.sha256_file(manifest_path),
+                        "repository": manifest["repository"],
+                        "base_sha": manifest["base_sha"],
+                        "apply_approval": approval,
+                        "layers": [
+                            {
+                                "branch": layers[0]["branch"],
+                                "remote_branch": layers[0]["remote_branch"],
+                                "tip": layers[0]["_tip"],
+                                "base": "main",
+                                "head": layers[0]["_head_ref"],
+                                "pr": {
+                                    "number": 99,
+                                    "url": "https://example.test/upstream/repo/pull/99",
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def populate_preflight(
+                _repo: Path,
+                _manifest: dict[str, Any],
+                live_layers: list[dict[str, Any]],
+            ) -> None:
+                live_layers[0]["_existing_pr"] = {
+                    "number": 41,
+                    "url": "https://example.test/upstream/repo/pull/41",
+                }
+
+            with mock.patch.object(
+                MODULE, "load_manifest", return_value=manifest
+            ), mock.patch.object(
+                MODULE, "configure_command_environment"
+            ), mock.patch.object(
+                MODULE, "validate", return_value=layers
+            ), mock.patch.object(
+                MODULE, "validate_approved_dry_run", return_value=approved_journal
+            ), mock.patch.object(
+                MODULE, "validate_sealed_apply_request", return_value=approval
+            ), mock.patch.object(
+                MODULE, "github_preflight", side_effect=populate_preflight
+            ), mock.patch.object(MODULE, "verify_pull_request") as verify_pr_mock:
+                with self.assertRaisesRegex(
+                    MODULE.SubmitError,
+                    "live upstream component PRs do not match the sealed apply journal",
+                ):
+                    MODULE.submit(
+                        directory,
+                        manifest_path,
+                        apply=True,
+                        manual=False,
+                        output=output_path,
+                        rendered_dir=directory / "rendered",
+                        manual_links=None,
+                        approved_dry_run=directory / "approved-dry-run.json",
+                        approved_apply_request=directory / "approved-apply-request.json",
+                    )
+
+            verify_pr_mock.assert_not_called()
+
     def test_only_integration_layer_uses_origin_fork_head(self) -> None:
         manifest = {
             "_head_owner": "upstream-owner",
@@ -667,6 +1021,192 @@ class SubmitterTests(unittest.TestCase):
         create_mock.assert_not_called()
         gh_mock.assert_not_called()
 
+    def test_validate_approved_dry_run_accepts_real_dry_run_journal_round_trip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, journal = (
+                self.write_dry_run_journal_fixture(directory)
+            )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
+
+            approved = MODULE.validate_approved_dry_run(
+                journal_path.resolve(),
+                manifest_path,
+                manifest,
+                layers,
+            )
+
+            self.assertEqual(
+                [layer["base"] for layer in approved["layers"]],
+                ["main", "stack/plan-pr-ready", "stack/story-1.1-pr-ready"],
+            )
+            self.assertEqual(
+                approved["_approved_component_bodies"],
+                [
+                    Path(layer["rendered_body"]).read_text(encoding="utf-8")
+                    for layer in journal["layers"]
+                ],
+            )
+            self.assertEqual(
+                approved["_approved_integration_body"],
+                Path(journal["integration_pr"]["rendered_body"]).read_text(
+                    encoding="utf-8"
+                ),
+            )
+
+    def test_validate_approved_dry_run_accepts_existing_component_links_round_trip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, journal = (
+                self.write_dry_run_journal_fixture(
+                    directory,
+                    existing_prs={
+                        0: {
+                            "number": 14,
+                            "url": "https://example.test/upstream/repo/pull/14",
+                        }
+                    },
+                )
+            )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
+            recorded_layer = journal["layers"][1]
+            self.assertIn("pr", journal["layers"][0])
+            self.assertNotEqual(
+                recorded_layer["rendered_body_sha256"],
+                MODULE.sha256_text(
+                    MODULE.render_body(
+                        layers,
+                        {},
+                        1,
+                        manifest["default_base"],
+                        manifest["feature_summary"],
+                        manifest["stack_label"],
+                        manifest["integration_evidence"],
+                        manifest["_head_owner"],
+                        manifest["feature_name"],
+                    )
+                ),
+            )
+            self.assertNotEqual(
+                journal["integration_pr"]["rendered_body_sha256"],
+                MODULE.sha256_text(MODULE.render_integration_body(manifest, layers, {})),
+            )
+
+            approved = MODULE.validate_approved_dry_run(
+                journal_path.resolve(),
+                manifest_path,
+                manifest,
+                layers,
+            )
+
+            self.assertEqual(approved["layers"][0]["pr"]["number"], 14)
+
+    def test_validate_approved_dry_run_accepts_existing_integration_pr_round_trip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, journal = (
+                self.write_dry_run_journal_fixture(
+                    directory,
+                    existing_integration_pr={
+                        "number": 90,
+                        "url": "https://example.test/upstream/repo/pull/90",
+                    },
+                )
+            )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
+            recorded_layer = journal["layers"][0]
+            self.assertIn("pr", journal["integration_pr"])
+            self.assertIn(
+                "Combined stack validation PR",
+                Path(recorded_layer["rendered_body"]).read_text(encoding="utf-8"),
+            )
+            self.assertNotEqual(
+                recorded_layer["rendered_body_sha256"],
+                MODULE.sha256_text(
+                    MODULE.render_body(
+                        layers,
+                        {},
+                        0,
+                        manifest["default_base"],
+                        manifest["feature_summary"],
+                        manifest["stack_label"],
+                        manifest["integration_evidence"],
+                        manifest["_head_owner"],
+                        manifest["feature_name"],
+                    )
+                ),
+            )
+
+            approved = MODULE.validate_approved_dry_run(
+                journal_path.resolve(),
+                manifest_path,
+                manifest,
+                layers,
+            )
+
+            self.assertEqual(approved["integration_pr"]["pr"]["number"], 90)
+
+    def test_validate_approved_dry_run_rejects_sha_instead_of_branch_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, _journal = (
+                self.write_dry_run_journal_fixture(directory)
+            )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
+            payload = json.loads(journal_path.read_text(encoding="utf-8"))
+            payload["layers"][1]["base"] = layers[1]["_base_sha"]
+            journal_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                MODULE.SubmitError, "approved dry-run journal layer topology changed"
+            ):
+                MODULE.validate_approved_dry_run(
+                    journal_path.resolve(),
+                    manifest_path,
+                    manifest,
+                    layers,
+                )
+
+    def test_load_apply_progress_accepts_branch_bases_from_persisted_journal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, _journal = (
+                self.write_dry_run_journal_fixture(directory)
+            )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
+            approval = {
+                "apply_request": str(directory / "apply-request.json"),
+                "apply_request_sha256": "a" * 64,
+                "preparation_receipt": str(directory / "preparation-receipt.json"),
+                "preparation_receipt_sha256": "b" * 64,
+            }
+            progress = json.loads(journal_path.read_text(encoding="utf-8"))
+            progress["status"] = "submitting"
+            progress["apply_approval"] = approval
+            progress_path = directory / "apply-progress.json"
+            MODULE.write_journal(progress_path, progress)
+
+            loaded = MODULE.load_apply_progress(
+                progress_path,
+                manifest_path,
+                manifest,
+                layers,
+                approval,
+            )
+
+            self.assertEqual(
+                [layer["base"] for layer in loaded["layers"]],
+                ["main", "stack/plan-pr-ready", "stack/story-1.1-pr-ready"],
+            )
+
     @mock.patch.object(MODULE, "git", return_value="")
     @mock.patch.object(MODULE, "validate_remote_urls")
     def test_manifest_forbids_cross_repository_component_publication(
@@ -695,6 +1235,151 @@ class SubmitterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(MODULE.SubmitError, "cross-repository component heads"):
             MODULE.validate(Path.cwd(), Path("manifest.json"), manifest)
+
+    @mock.patch.object(MODULE, "preflight_integration_pull_request")
+    @mock.patch.object(MODULE, "remote_sha", return_value=None)
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    @mock.patch.object(MODULE, "github_repository_preflight")
+    def test_preflight_ignores_superseded_closed_pr_for_its_head(
+        self,
+        _repository_mock: mock.Mock,
+        pulls_mock: mock.Mock,
+        remote_mock: mock.Mock,
+        _integration_mock: mock.Mock,
+    ) -> None:
+        """A permanently-closed PR (e.g. unreopenable after a force-push) that is explicitly
+        listed as superseded must not block preflight for a fresh PR on the same head."""
+        pulls_mock.return_value = [
+            {
+                "number": 33,
+                "url": "https://example.test/upstream/repo/pull/33",
+                "state": "CLOSED",
+                "isDraft": False,
+                "baseRefName": "stack/plan-pr-ready",
+                "baseRefOid": "z" * 40,
+                "headRefOid": "b" * 40,
+                "headRepositoryOwner": "upstream",
+            }
+        ]
+        layers = [
+            {
+                "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "stack/plan-pr-ready",
+                "_tip": "a" * 40,
+                "_superseded_prs": set(),
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "stack/story-pr-ready",
+                "_tip": "b" * 40,
+                "_superseded_prs": {33},
+            },
+        ]
+        manifest = {
+            "repository": "example.test/upstream/repo",
+            "_head_owner": "upstream",
+            "publish_remote": "upstream",
+            "default_base": "main",
+            "base_sha": "a" * 40,
+            "draft": True,
+        }
+        pulls_mock.side_effect = [[], pulls_mock.return_value]
+        remote_mock.side_effect = ["a" * 40, "b" * 40]
+
+        MODULE.github_preflight(Path.cwd(), manifest, layers)
+        self.assertNotIn("_existing_pr", layers[1])
+
+    @mock.patch.object(MODULE, "preflight_integration_pull_request")
+    @mock.patch.object(MODULE, "remote_sha", return_value=None)
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    @mock.patch.object(MODULE, "github_repository_preflight")
+    def test_preflight_rejects_superseded_prs_that_are_still_open(
+        self,
+        _repository_mock: mock.Mock,
+        pulls_mock: mock.Mock,
+        remote_mock: mock.Mock,
+        _integration_mock: mock.Mock,
+    ) -> None:
+        """superseded_prs must never silently bypass a live, still-open competing PR."""
+        pulls_mock.return_value = [
+            {
+                "number": 33,
+                "url": "https://example.test/upstream/repo/pull/33",
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "stack/plan-pr-ready",
+                "baseRefOid": "z" * 40,
+                "headRefOid": "b" * 40,
+                "headRepositoryOwner": "upstream",
+            }
+        ]
+        layers = [
+            {
+                "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "stack/plan-pr-ready",
+                "_tip": "a" * 40,
+                "_superseded_prs": set(),
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "stack/story-pr-ready",
+                "_tip": "b" * 40,
+                "_superseded_prs": {33},
+            },
+        ]
+        manifest = {
+            "repository": "example.test/upstream/repo",
+            "_head_owner": "upstream",
+            "publish_remote": "upstream",
+            "default_base": "main",
+            "base_sha": "a" * 40,
+            "draft": True,
+        }
+        pulls_mock.side_effect = [[], pulls_mock.return_value]
+        remote_mock.return_value = "a" * 40
+
+        with self.assertRaisesRegex(MODULE.SubmitError, "still-OPEN"):
+            MODULE.github_preflight(Path.cwd(), manifest, layers)
+
+    @mock.patch.object(MODULE, "preflight_integration_pull_request")
+    @mock.patch.object(MODULE, "remote_sha", return_value=None)
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    @mock.patch.object(MODULE, "github_repository_preflight")
+    def test_preflight_rejects_superseded_pr_number_that_does_not_exist(
+        self,
+        _repository_mock: mock.Mock,
+        pulls_mock: mock.Mock,
+        remote_mock: mock.Mock,
+        _integration_mock: mock.Mock,
+    ) -> None:
+        """A stale/mistyped superseded_prs entry that matches no PR fails closed."""
+        layers = [
+            {
+                "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "stack/plan-pr-ready",
+                "_tip": "a" * 40,
+                "_superseded_prs": set(),
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "stack/story-pr-ready",
+                "_tip": "b" * 40,
+                "_superseded_prs": {33},
+            },
+        ]
+        manifest = {
+            "repository": "example.test/upstream/repo",
+            "_head_owner": "upstream",
+            "publish_remote": "upstream",
+            "default_base": "main",
+            "base_sha": "a" * 40,
+            "draft": True,
+        }
+        pulls_mock.side_effect = [[], []]
+        remote_mock.return_value = "a" * 40
+
+        with self.assertRaisesRegex(MODULE.SubmitError, "fix the allowlist"):
+            MODULE.github_preflight(Path.cwd(), manifest, layers)
 
     @mock.patch.object(MODULE, "preflight_integration_pull_request")
     @mock.patch.object(MODULE, "remote_sha", return_value=None)
@@ -1113,7 +1798,7 @@ class SubmitterTests(unittest.TestCase):
                                            {"_tip": "final", "remote_branch": "two"}],
                 )
 
-    def test_verify_pull_request_rejects_removed_or_drifted_evidence_section(self) -> None:
+    def test_verify_pull_request_rejects_incomplete_expected_evidence_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             body_file = Path(temporary) / "body.md"
             body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
@@ -1145,7 +1830,11 @@ class SubmitterTests(unittest.TestCase):
             _, after = remainder.split(navigation, 1)
             bodies = {
                 "removed": before + navigation + after,
-                "drifted": expected.replace("42 passed", "41 passed", 1),
+                "missing report link": expected.replace(
+                    self.evidence["_report_url"],
+                    "https://example.test/changed-report",
+                    1,
+                ),
             }
             for name, body in bodies.items():
                 with self.subTest(name=name), mock.patch.object(
@@ -1162,11 +1851,332 @@ class SubmitterTests(unittest.TestCase):
                         },
                         "body": body,
                     }),
-                ), self.assertRaisesRegex(MODULE.SubmitError, "PR body drifted"):
+                ), self.assertRaisesRegex(
+                    MODULE.SubmitError, "PR evidence is incomplete"
+                ):
                     MODULE.verify_pull_request(
                         Path.cwd(), manifest, layers, links, 1, layers[1], "main",
-                        {"number": 42}, True, expected
+                        {"number": 42}, True, body
                     )
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_pull_request_updates_stale_title_and_body_in_place(
+        self,
+        api_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [
+                dict(layer, _tip=str(index + 1) * 40, _body_file=body_file)
+                for index, layer in enumerate(self.layers)
+            ]
+            links = {
+                0: {"number": 41, "url": "https://example.test/pull/41"},
+                1: {"number": 42, "url": "https://example.test/pull/42"},
+            }
+            manifest = {
+                "repository": "example.test/owner/repo",
+                "_head_owner": "contributor",
+                "default_base": "main",
+                "base_sha": "0" * 40,
+                "stack_label": "feature-x",
+                "feature_name": "Feature X",
+                "feature_summary": "Focused change.",
+                "integration_evidence": self.evidence,
+                "draft": False,
+            }
+            expected = MODULE.render_body(
+                layers,
+                links,
+                1,
+                "main",
+                "Focused change.",
+                "feature-x",
+                self.evidence,
+                "contributor",
+                "Feature X",
+            )
+            api_mock.side_effect = [
+                json.dumps(
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": "stale title",
+                        "base": {"ref": "main", "sha": layers[0]["_tip"]},
+                        "head": {
+                            "ref": layers[1]["remote_branch"],
+                            "sha": layers[1]["_tip"],
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": "stale body",
+                    }
+                ),
+                "",
+            ]
+
+            MODULE.verify_pull_request(
+                Path.cwd(),
+                manifest,
+                layers,
+                links,
+                1,
+                layers[1],
+                "main",
+                {"number": 42},
+                True,
+                expected,
+                allow_editorial_sync=True,
+            )
+
+        self.assertEqual(len(api_mock.call_args_list), 2)
+        patch_call = api_mock.call_args_list[1]
+        self.assertEqual(
+            patch_call.args[:3],
+            (
+                Path.cwd(),
+                "example.test/owner/repo",
+                "repos/owner/repo/pulls/42",
+            ),
+        )
+        self.assertEqual(
+            patch_call.args[3:],
+            ("--method", "PATCH", "-f", f"title={MODULE.stacked_title(layers[1], 1, 2, 'feature-x')}", "-f", f"body={expected}"),
+        )
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_pull_request_accepts_already_ready_pr_and_refreshes_editorial_content(
+        self,
+        api_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [
+                dict(layer, _tip=str(index + 1) * 40, _body_file=body_file)
+                for index, layer in enumerate(self.layers)
+            ]
+            links = {0: {"number": 41, "url": "https://example.test/pull/41"}}
+            manifest = {
+                "repository": "example.test/owner/repo",
+                "_head_owner": "contributor",
+                "default_base": "main",
+                "base_sha": "0" * 40,
+                "stack_label": "feature-x",
+                "feature_name": "Feature X",
+                "feature_summary": "Focused change.",
+                "integration_evidence": self.evidence,
+                "draft": False,
+            }
+            expected = MODULE.render_body(
+                layers,
+                links,
+                0,
+                "main",
+                "Focused change.",
+                "feature-x",
+                self.evidence,
+                "contributor",
+                "Feature X",
+            )
+            api_mock.side_effect = [
+                json.dumps(
+                    {
+                        "state": "open",
+                        "draft": False,
+                        "title": "old ready title",
+                        "base": {"ref": "main", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": layers[0]["_tip"],
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": "old ready body",
+                    }
+                ),
+                "",
+            ]
+
+            MODULE.verify_pull_request(
+                Path.cwd(),
+                manifest,
+                layers,
+                links,
+                0,
+                layers[0],
+                "main",
+                {"number": 41},
+                True,
+                expected,
+                allow_editorial_sync=True,
+            )
+
+        self.assertEqual(len(api_mock.call_args_list), 2)
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_pull_request_still_rejects_structural_mismatch(self, api_mock: mock.Mock) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [
+                dict(layer, _tip=str(index + 1) * 40, _body_file=body_file)
+                for index, layer in enumerate(self.layers)
+            ]
+            manifest = {
+                "repository": "example.test/owner/repo",
+                "_head_owner": "contributor",
+                "default_base": "main",
+                "base_sha": "0" * 40,
+                "stack_label": "feature-x",
+                "feature_name": "Feature X",
+                "feature_summary": "Focused change.",
+                "integration_evidence": self.evidence,
+                "draft": False,
+            }
+            expected = MODULE.render_body(
+                layers,
+                {},
+                0,
+                "main",
+                "Focused change.",
+                "feature-x",
+                self.evidence,
+                "contributor",
+                "Feature X",
+            )
+            cases = (
+                (
+                    "head sha",
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": MODULE.stacked_title(layers[0], 0, 2, "feature-x"),
+                        "base": {"ref": "main", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": "9" * 40,
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": expected,
+                    },
+                    "headRefOid",
+                ),
+                (
+                    "base",
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": MODULE.stacked_title(layers[0], 0, 2, "feature-x"),
+                        "base": {"ref": "release", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": layers[0]["_tip"],
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": expected,
+                    },
+                    "baseRefName",
+                ),
+                (
+                    "owner",
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": MODULE.stacked_title(layers[0], 0, 2, "feature-x"),
+                        "base": {"ref": "main", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": layers[0]["_tip"],
+                            "repo": {"owner": {"login": "fork-owner"}},
+                        },
+                        "body": expected,
+                    },
+                    "headRepositoryOwner",
+                ),
+            )
+            for name, payload, field in cases:
+                with self.subTest(name=name):
+                    api_mock.reset_mock()
+                    api_mock.return_value = json.dumps(payload)
+                    with self.assertRaisesRegex(
+                        MODULE.SubmitError, f"submitted PR state mismatch.*{field}"
+                    ):
+                        MODULE.verify_pull_request(
+                            Path.cwd(),
+                            manifest,
+                            layers,
+                            {},
+                            0,
+                            layers[0],
+                            "main",
+                            {"number": 41},
+                            True,
+                            expected,
+                        )
+                    self.assertEqual(api_mock.call_count, 1)
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_integration_pull_request_updates_stale_title_and_body_in_place(
+        self,
+        api_mock: mock.Mock,
+    ) -> None:
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "default_base": "main",
+            "base_sha": "0" * 40,
+            "feature_name": "Feature X",
+            "stack_label": "feature-x",
+            "_evidence_owner": "contributor",
+            "integration_evidence": self.evidence,
+        }
+        manifest["_integration_layer"] = MODULE.integration_layer(
+            {
+                **manifest,
+                "integration_evidence": {
+                    **self.evidence,
+                    "branch": self.evidence["branch"],
+                    "_commit": self.evidence["_commit"],
+                },
+            }
+        )
+        layers = [
+            {"title": "docs: plan feature", "summary": "Feature plan.", "remote_branch": "stack/plan-pr-ready", "_tip": "1" * 40},
+            {"title": "feat: implement feature", "summary": "Implementation.", "remote_branch": "stack/story-pr-ready", "_tip": "2" * 40},
+        ]
+        expected = MODULE.render_integration_body(
+            manifest,
+            layers,
+            {0: {"number": 41, "url": "https://example.test/pull/41"}},
+        )
+        api_mock.side_effect = [
+            json.dumps(
+                {
+                    "state": "open",
+                    "draft": True,
+                    "title": "stale integration title",
+                    "base": {"ref": "main", "sha": "0" * 40},
+                    "head": {
+                        "ref": manifest["_integration_layer"]["remote_branch"],
+                        "sha": manifest["_integration_layer"]["_tip"],
+                        "repo": {"owner": {"login": "contributor"}},
+                    },
+                    "body": "stale integration body",
+                }
+            ),
+            "",
+        ]
+
+        MODULE.verify_integration_pull_request(
+            Path.cwd(),
+            manifest,
+            layers,
+            {0: {"number": 41, "url": "https://example.test/pull/41"}},
+            {"number": 90},
+            expected,
+            allow_editorial_sync=True,
+        )
+
+        self.assertEqual(len(api_mock.call_args_list), 2)
 
     def test_pr_111_fallback_headings_are_exact_and_ordered(self) -> None:
         template = Path(
@@ -1676,6 +2686,62 @@ class SubmitterTests(unittest.TestCase):
         )
 
         self.assertIs(reconciled, expected)
+        remote_sha_mock.assert_not_called()
+
+    @mock.patch.object(MODULE, "remote_sha")
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    def test_reconcile_ignores_superseded_pr_alongside_freshly_created_one(
+        self,
+        pulls_mock: mock.Mock,
+        remote_sha_mock: mock.Mock,
+    ) -> None:
+        """After `gh pr create`, the closed superseded PR and the brand-new PR both exist for
+        the same head; reconcile must filter out the former rather than flag "multiple PRs"."""
+        predecessor = "1" * 40
+        layer = {
+            "remote_branch": "stack/story-pr-ready",
+            "_tip": "2" * 40,
+            "_base_sha": predecessor,
+            "_superseded_prs": {33},
+        }
+        superseded = {
+            "number": 33,
+            "url": "https://example.test/pull/33",
+            "state": "CLOSED",
+            "isDraft": False,
+            "baseRefName": "stack/plan-pr-ready",
+            "baseRefOid": "z" * 40,
+            "headRefName": "stack/story-pr-ready",
+            "headRefOid": "9" * 40,
+            "headRepositoryOwner": "upstream",
+        }
+        fresh = {
+            "number": 42,
+            "url": "https://example.test/pull/42",
+            "state": "OPEN",
+            "isDraft": True,
+            "baseRefName": "stack/plan-pr-ready",
+            "baseRefOid": predecessor,
+            "headRefName": "stack/story-pr-ready",
+            "headRefOid": "2" * 40,
+            "headRepositoryOwner": "upstream",
+        }
+        pulls_mock.return_value = [superseded, fresh]
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "_head_owner": "upstream",
+            "default_base": "main",
+            "base_sha": "0" * 40,
+        }
+
+        reconciled = MODULE.reconcile_created_pull_request(
+            Path.cwd(),
+            manifest,
+            layer,
+            "stack/plan-pr-ready",
+        )
+
+        self.assertIs(reconciled, fresh)
         remote_sha_mock.assert_not_called()
 
     @mock.patch.object(MODULE, "validate_manual_links_live")

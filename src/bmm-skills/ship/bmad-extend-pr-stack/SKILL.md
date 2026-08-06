@@ -52,6 +52,29 @@ problem is a PR metadata issue or a real branch-topology issue.
   across every still-relevant component PR.</critical>
 </step>
 
+<critical>
+**Default-branch freshness invariant.** Per-layer and integration validation are only valid against
+the exact default-branch commit the stack was cascaded onto. The default branch keeps moving while
+reviews are in flight, so that evidence goes stale on someone else's merge, not on any change of
+yours.
+
+Therefore: **re-cascade onto the current default-branch head, and re-validate, before stack review,
+before submitting or refreshing PR bodies, and before merging.** Treat a cascade as expiring the
+moment the default branch advances past the base it recorded.
+
+Enforce it mechanically rather than by memory:
+- Record the default-branch base SHA the cascade ran against in the cascade report, the integration
+  PR body, and any validation evidence artifact.
+- Before review/submit/merge, compare that recorded SHA against the live default-branch head. If they
+  differ, the stack is stale: re-cascade and re-validate before proceeding.
+- Never present per-layer green earned on a stale base as current evidence, and never restate a prior
+  run's pass counts as if they still hold.
+
+This is a standing invariant, not a one-time fix. A stack held open across many reviews will need
+this repeatedly; that recurring cost is a reason to land lower layers promptly rather than hold the
+whole chain open.
+</critical>
+
 <step n="2" goal="Determine whether the problem is metadata or graph topology">
   <action>Check the actual ancestry of the component heads and the integration/evidence branch before
   rewriting anything. Distinguish:
@@ -121,6 +144,27 @@ problem is a PR metadata issue or a real branch-topology issue.
   <action>If fork-side review-only drafts exist in addition to upstream component PRs, retire the fork
   drafts once the upstream stack is correct and cross-linked.</action>
 </step>
+
+<critical>
+Mid-stack layers are not required to pass their own checks. A layer that fails only because it needs
+something a LATER layer in the same stack introduces is behaving correctly for a stacked chain. The
+integration/validation branch is the single authoritative green gate — it proves the stack passes once
+merged in order.
+
+Do not reorder layers, move dependency declarations earlier, pull pin/version bumps forward, or add
+skips solely to chase a mid-stack green. That rewrites reviewed layers and discards approvals to
+chase a signal that was never the gate. Fix a failing check only when it is a genuine defect — one
+that would still fail with the entire stack merged — and fix it at its owning layer.
+
+One narrow exception: if the layer would break the DEFAULT BRANCH the moment its own PR merges, then
+pulling a declaration or pin bump earlier is the correct fix, not the prohibited one. This arises when
+the stack sits directly on the default branch, so merging a layer makes the default branch's tree
+equal to that layer's tree. Prove it before acting — check that layer out in a pristine worktree and
+run the default branch's own required checks with the exact commands CI uses — and record which class
+you invoked in the PR body and the cascade report. A feature flag does not cover this case: it gates
+runtime behavior, not an import, a lockfile, a migration, or a build step. Mid-stack green was never
+the gate; the default branch always is.
+</critical>
 
 <step n="6" goal="Prove the enlarged stack is coherent">
   <action>Verify every component PR in the live stack has:

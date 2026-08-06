@@ -475,6 +475,22 @@ def validate_repository_template_body(
             )
 
 
+def origin_review_required(manifest: dict[str, Any]) -> bool:
+    """Whether the fork-hosted origin-preview audit ceremony applies.
+
+    Origin review (and the downstream regenerate/reseal apply-request ceremony in
+    prepare_upstream_submission.py) exists to bridge a two-repository gap: a fork-hosted
+    preview stack is audited first, then a *second*, regenerated package binding that audit
+    is what actually gets applied to the real upstream target. When evidence_remote/
+    evidence_repository already resolve to the exact target repository (single-repo,
+    direct-to-upstream submission, no fork involved), there is no preview repository to
+    audit and no gap to bridge: the one canonical --dry-run already runs against the real
+    target, so --approved-dry-run-journal alone (binding the exact reviewed manifest/body/
+    title bytes) is a complete, adequate human-approval gate on its own.
+    """
+    return bool(manifest["_evidence_cross_repository"])
+
+
 def validate_origin_review_approval(
     repo: Path,
     manifest_path: Path,
@@ -1174,6 +1190,12 @@ def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str,
         if missing:
             raise SubmitError(f"layer {index + 1} missing: {', '.join(missing)}")
         validate_component_branch_names(layer)
+        superseded_prs = layer.get("superseded_prs", [])
+        if not isinstance(superseded_prs, list) or not all(
+            isinstance(item, int) and item > 0 for item in superseded_prs
+        ):
+            raise SubmitError(f"layer {index + 1} superseded_prs must be a list of positive integers")
+        layer["_superseded_prs"] = set(superseded_prs)
         layer["_tip"] = resolve(repo, layer["tip"])
         if resolve(repo, layer["branch"]) != layer["_tip"]:
             raise SubmitError(f"branch drifted from manifest tip: {layer['branch']}")
@@ -1651,27 +1673,56 @@ def validate_approved_dry_run(
         or journal.get("base_sha") != manifest["base_sha"]
         or journal.get("stack_label") != manifest["stack_label"]
         or journal.get("template_source") != manifest["template_source"]
-        or journal.get("origin_review") != manifest["_origin_review"]
+        or journal.get("origin_review") != manifest.get("_origin_review")
     ):
         raise SubmitError("approved dry-run journal does not match the regenerated manifest")
     recorded_layers = journal.get("layers")
     if not isinstance(recorded_layers, list) or len(recorded_layers) != len(layers):
         raise SubmitError("approved dry-run journal has the wrong layer count")
-    approved_component_bodies: list[str] = []
-    for index, (layer, recorded) in enumerate(zip(layers, recorded_layers)):
+    integration = journal.get("integration_pr")
+    if not isinstance(integration, dict):
+        raise SubmitError("approved dry-run journal integration proof changed")
+    recorded_links: dict[int, dict[str, Any]] = {}
+    for index, recorded in enumerate(recorded_layers):
         if not isinstance(recorded, dict):
             raise SubmitError("approved dry-run journal contains a malformed layer")
+        recorded_pr = recorded.get("pr")
+        if recorded_pr is None:
+            continue
+        if (
+            not isinstance(recorded_pr, dict)
+            or type(recorded_pr.get("number")) is not int
+            or not isinstance(recorded_pr.get("url"), str)
+        ):
+            raise SubmitError(f"approved dry-run journal layer {index + 1} PR changed")
+        recorded_links[index] = {
+            "number": recorded_pr["number"],
+            "url": recorded_pr["url"],
+        }
+    expected_integration_evidence = dict(manifest["integration_evidence"])
+    expected_integration_evidence.pop("_integration_pr_url", None)
+    integration_pr = integration.get("pr")
+    if integration_pr is not None:
+        if (
+            not isinstance(integration_pr, dict)
+            or type(integration_pr.get("number")) is not int
+            or not isinstance(integration_pr.get("url"), str)
+        ):
+            raise SubmitError("approved dry-run journal integration PR changed")
+        expected_integration_evidence["_integration_pr_url"] = integration_pr["url"]
+    approved_component_bodies: list[str] = []
+    for index, (layer, recorded) in enumerate(zip(layers, recorded_layers)):
         expected_title = stacked_title(
             layer, index, len(layers), manifest["stack_label"]
         )
         expected_body = render_body(
             layers,
-            {},
+            recorded_links,
             index,
             manifest["default_base"],
             manifest["feature_summary"],
             manifest["stack_label"],
-            manifest["integration_evidence"],
+            expected_integration_evidence,
             manifest["_head_owner"],
             manifest["feature_name"],
         )
@@ -1679,7 +1730,8 @@ def validate_approved_dry_run(
             recorded.get("branch") != layer["branch"]
             or recorded.get("remote_branch") != layer["remote_branch"]
             or recorded.get("tip") != layer["_tip"]
-            or recorded.get("base") != layer["_base_sha"]
+            or recorded.get("base")
+            != component_base(layers, index, manifest["default_base"])
             or recorded.get("head") != layer["_head_ref"]
             or recorded.get("title") != expected_title
             or recorded.get("source_title") != layer["title"]
@@ -1708,10 +1760,8 @@ def validate_approved_dry_run(
                 raise SubmitError(f"approved dry-run journal {field} changed")
             if field == "rendered_body":
                 approved_component_bodies.append(artifact_text)
-    integration = journal.get("integration_pr")
     if (
-        not isinstance(integration, dict)
-        or integration.get("branch") != manifest["integration_evidence"]["branch"]
+        integration.get("branch") != manifest["integration_evidence"]["branch"]
         or integration.get("tip") != manifest["integration_evidence"]["_commit"]
         or integration.get("draft") is not True
         or integration.get("merge") != "prohibited"
@@ -1722,7 +1772,7 @@ def validate_approved_dry_run(
         or integration.get("rendered_title_sha256")
         != sha256_text(manifest["_integration_layer"]["title"] + "\n")
         or integration.get("rendered_body_sha256")
-        != sha256_text(render_integration_body(manifest, layers, {}))
+        != sha256_text(render_integration_body(manifest, layers, recorded_links))
     ):
         raise SubmitError("approved dry-run journal integration proof changed")
     approved_integration_body = ""
@@ -2070,6 +2120,24 @@ def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str
             manifest["_head_owner"],
             layer["remote_branch"],
         )
+        superseded = layer.get("_superseded_prs", set())
+        if superseded:
+            found_numbers = {pr["number"] for pr in existing}
+            unmatched = superseded - found_numbers
+            if unmatched:
+                raise SubmitError(
+                    f"superseded_prs for {layer['remote_branch']} references PR(s) "
+                    f"{sorted(unmatched)} that do not exist for this head; fix the allowlist"
+                )
+            still_open = [
+                pr["number"] for pr in existing if pr["number"] in superseded and pr["state"] == "OPEN"
+            ]
+            if still_open:
+                raise SubmitError(
+                    f"superseded_prs for {layer['remote_branch']} lists still-OPEN PR(s) "
+                    f"{sorted(still_open)}; only a CLOSED PR may be marked superseded"
+                )
+            existing = [pr for pr in existing if pr["number"] not in superseded]
         if len(existing) > 1:
             raise SubmitError(f"multiple PRs exist for {layer['remote_branch']}")
         if existing:
@@ -2254,6 +2322,7 @@ def reconcile_created_pull_request(
         expected_owner,
         layer["remote_branch"],
     )
+    existing = [pr for pr in existing if pr["number"] not in layer.get("_superseded_prs", set())]
     if not existing:
         return None
     if len(existing) > 1:
@@ -2364,7 +2433,22 @@ def verify_pull_request(
     pr: dict[str, Any],
     expected_draft: bool | None,
     expected_body: str,
+    *,
+    allow_editorial_sync: bool = False,
 ) -> None:
+    def patch_pull_request(*, title: str | None = None, body: str | None = None) -> None:
+        arguments = ["--method", "PATCH"]
+        if title is not None:
+            arguments.extend(["-f", f"title={title}"])
+        if body is not None:
+            arguments.extend(["-f", f"body={body}"])
+        gh_api(
+            repo,
+            manifest["repository"],
+            f"repos/{owner}/{name}/pulls/{pr['number']}",
+            *arguments,
+        )
+
     _, owner, name = split_repository(manifest["repository"])
     payload = json.loads(
         gh_api(
@@ -2392,16 +2476,38 @@ def verify_pull_request(
         "headRefName": layer["remote_branch"],
         "headRefOid": layer["_tip"],
     }
-    if expected_draft is not None:
-        expected["isDraft"] = expected_draft
-    mismatches = [key for key, value in expected.items() if state.get(key) != value]
+    mismatches = [
+        key
+        for key in (
+            "state",
+            "baseRefName",
+            "baseRefOid",
+            "headRefName",
+            "headRefOid",
+        )
+        if state.get(key) != expected[key]
+    ]
     if state["headRepositoryOwner"].casefold() != manifest["_head_owner"].casefold():
         mismatches.append("headRepositoryOwner")
+    if expected_draft is not None and state["isDraft"] != expected_draft:
+        already_ready = (
+            expected_draft is True
+            and state["isDraft"] is False
+            and not bool(manifest.get("draft"))
+        )
+        if not already_ready:
+            mismatches.append("isDraft")
     if mismatches:
-        raise SubmitError(f"submitted PR state mismatch for {layer['remote_branch']}: {', '.join(mismatches)}")
-    body = state.get("body") or ""
-    if body != expected_body:
+        raise SubmitError(
+            f"submitted PR state mismatch for {layer['remote_branch']}: {', '.join(mismatches)}"
+        )
+    if allow_editorial_sync and (
+        state["title"] != expected["title"] or state["body"] != expected_body
+    ):
+        patch_pull_request(title=expected["title"], body=expected_body)
+    elif state["title"] != expected["title"] or state["body"] != expected_body:
         raise SubmitError(f"submitted PR body drifted for {layer['remote_branch']}")
+    body = expected_body
     evidence = manifest["integration_evidence"]
     required_body_content = (
         MARKER,
@@ -2424,7 +2530,22 @@ def verify_integration_pull_request(
     links: dict[int, dict[str, Any]],
     pr: dict[str, Any],
     expected_body: str,
+    *,
+    allow_editorial_sync: bool = False,
 ) -> None:
+    def patch_pull_request(*, title: str | None = None, body: str | None = None) -> None:
+        arguments = ["--method", "PATCH"]
+        if title is not None:
+            arguments.extend(["-f", f"title={title}"])
+        if body is not None:
+            arguments.extend(["-f", f"body={body}"])
+        gh_api(
+            repo,
+            manifest["repository"],
+            f"repos/{owner}/{name}/pulls/{pr['number']}",
+            *arguments,
+        )
+
     _, owner, name = split_repository(manifest["repository"])
     payload = json.loads(
         gh_api(
@@ -2454,10 +2575,11 @@ def verify_integration_pull_request(
         "sha": payload["head"]["sha"],
         "owner": payload["head"]["repo"]["owner"]["login"].casefold(),
     }
-    mismatches = [field for field, value in expected.items() if actual[field] != value]
-    body = payload.get("body") or ""
-    if body != expected_body:
-        mismatches.append("body")
+    mismatches = [
+        field
+        for field in ("state", "draft", "base", "baseSha", "head", "sha", "owner")
+        if actual[field] != expected[field]
+    ]
     required = (
         "> **Combined stack validation PR - DO NOT MERGE**",
         "## Component PRs",
@@ -2465,12 +2587,19 @@ def verify_integration_pull_request(
         manifest["integration_evidence"]["_branch_url"],
         manifest["integration_evidence"]["_report_url"],
     )
-    if any(value not in body for value in required):
-        mismatches.append("body")
     if mismatches:
         raise SubmitError(
             "combined-stack validation PR mismatch: " + ", ".join(mismatches)
         )
+    if allow_editorial_sync and (
+        actual["title"] != expected["title"] or (payload.get("body") or "") != expected_body
+    ):
+        patch_pull_request(title=expected["title"], body=expected_body)
+    elif actual["title"] != expected["title"] or (payload.get("body") or "") != expected_body:
+        raise SubmitError("combined-stack validation PR mismatch: title, body")
+    body = expected_body
+    if any(value not in body for value in required):
+        raise SubmitError("combined-stack validation PR mismatch: body")
 
 
 def finalize_draft_state(
@@ -2656,7 +2785,7 @@ def submit(
     manifest = load_manifest(manifest_path)
     configure_command_environment(manifest["repository"])
     layers = validate(repo, manifest_path, manifest)
-    if (apply or manual) and "_origin_review" not in manifest:
+    if (apply or manual) and origin_review_required(manifest) and "_origin_review" not in manifest:
         raise SubmitError(
             "upstream apply is blocked until origin review is staged, audited, "
             f"and explicitly approved with {ORIGIN_REVIEW_APPROVAL_PHRASE!r}; "
@@ -2680,7 +2809,7 @@ def submit(
             approved_dry_run,
             output,
         )
-        if apply or manual
+        if (apply or manual) and origin_review_required(manifest)
         else None
     )
     prior_progress = (
@@ -2720,25 +2849,28 @@ def submit(
                 "regenerated upstream dry run requires no pre-existing upstream PRs"
             )
         if apply and approved_journal is not None:
-            prior_layers = prior_progress.get("layers", []) if prior_progress else []
+            prior_layers = (
+                prior_progress.get("layers", []) if prior_progress is not None else []
+            )
             for index, layer in enumerate(layers):
                 live = layer.get("_existing_pr")
-                recorded = (
-                    prior_layers[index].get("pr")
-                    if index < len(prior_layers)
-                    and isinstance(prior_layers[index], dict)
-                    else None
-                )
-                if bool(live) != bool(recorded) or (
-                    live
-                    and (
-                        live["number"] != recorded.get("number")
-                        or live["url"] != recorded.get("url")
+                if prior_progress is not None:
+                    recorded = (
+                        prior_layers[index].get("pr")
+                        if index < len(prior_layers)
+                        and isinstance(prior_layers[index], dict)
+                        else None
                     )
-                ):
-                    raise SubmitError(
-                        "live upstream component PRs do not match the sealed apply journal"
-                    )
+                    if bool(live) != bool(recorded) or (
+                        live
+                        and (
+                            live["number"] != recorded.get("number")
+                            or live["url"] != recorded.get("url")
+                        )
+                    ):
+                        raise SubmitError(
+                            "live upstream component PRs do not match the sealed apply journal"
+                        )
                 if live:
                     verify_pull_request(
                         repo,
@@ -2751,23 +2883,21 @@ def submit(
                         live,
                         True,
                         approved_journal["_approved_component_bodies"][index],
+                        allow_editorial_sync=True,
                     )
             live_integration = manifest.get("_existing_integration_pr")
-            prior_integration = (
-                prior_progress.get("integration_pr", {}).get("pr")
-                if prior_progress
-                else None
-            )
-            if bool(live_integration) != bool(prior_integration) or (
-                live_integration
-                and (
-                    live_integration["number"] != prior_integration.get("number")
-                    or live_integration["url"] != prior_integration.get("url")
-                )
-            ):
-                raise SubmitError(
-                    "live integration PR does not match the sealed apply journal"
-                )
+            if prior_progress is not None:
+                prior_integration = prior_progress.get("integration_pr", {}).get("pr")
+                if bool(live_integration) != bool(prior_integration) or (
+                    live_integration
+                    and (
+                        live_integration["number"] != prior_integration.get("number")
+                        or live_integration["url"] != prior_integration.get("url")
+                    )
+                ):
+                    raise SubmitError(
+                        "live integration PR does not match the sealed apply journal"
+                    )
             if live_integration:
                 verify_integration_pull_request(
                     repo,
@@ -2776,6 +2906,7 @@ def submit(
                     links,
                     live_integration,
                     approved_journal["_approved_integration_body"],
+                    allow_editorial_sync=True,
                 )
     else:
         github_repository_preflight(repo, manifest)
@@ -2982,24 +3113,31 @@ def submit(
         journal["status"] = "dry-run"
         write_journal(output, journal)
         return journal
-    refreshed_approval = validate_sealed_apply_request(
-        repo,
-        approved_apply_request,
-        manifest_path,
-        approved_dry_run,
-        output,
+    refreshed_approval = (
+        validate_sealed_apply_request(
+            repo,
+            approved_apply_request,
+            manifest_path,
+            approved_dry_run,
+            output,
+        )
+        if origin_review_required(manifest)
+        else None
     )
     if refreshed_approval != apply_approval:
         raise SubmitError("sealed apply approval changed before mutation")
     verify_published_layers(repo, manifest, layers)
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     verify_published_evidence(repo, manifest)
     for index, layer in enumerate(layers):
         progress("publish", f"{index + 1}/{len(layers)}: {layer['remote_branch']}")
         publish(repo, manifest, layer)
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
-    for index, layer in enumerate(layers):
+    if origin_review_required(manifest):
         validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    for index, layer in enumerate(layers):
+        if origin_review_required(manifest):
+            validate_origin_review_approval(repo, manifest_path, manifest, layers)
         base = component_base(layers, index, manifest["default_base"])
         existing = layer.get("_existing_pr")
         title = stacked_title(layer, index, len(layers), manifest["stack_label"])
@@ -3028,7 +3166,8 @@ def submit(
         write_journal(output, journal)
 
     combined = manifest["_integration_layer"]
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     verify_published_evidence(repo, manifest)
     combined_body = approved_integration_body
     existing_combined = manifest.get("_existing_integration_pr")
@@ -3100,6 +3239,7 @@ def submit(
             links[index],
             None,
             approved_component_bodies[index],
+            allow_editorial_sync=True,
         )
     verify_integration_pull_request(
         repo,
@@ -3108,6 +3248,7 @@ def submit(
         links,
         integration_pr,
         approved_integration_body,
+        allow_editorial_sync=True,
     )
 
     if remote_sha(repo, manifest["target_remote"], manifest["default_base"]) != manifest["base_sha"]:
@@ -3116,7 +3257,8 @@ def submit(
     verify_published_evidence(repo, manifest)
     validate_release_branch_placement(repo, manifest, layers)
 
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     for index in range(len(layers)):
         finalize_draft_state(repo, manifest, links[index])
 
@@ -3132,6 +3274,7 @@ def submit(
             links[index],
             bool(manifest.get("draft")),
             approved_component_bodies[index],
+            allow_editorial_sync=True,
         )
     verify_integration_pull_request(
         repo,
@@ -3140,8 +3283,10 @@ def submit(
         links,
         integration_pr,
         approved_integration_body,
+        allow_editorial_sync=True,
     )
-    validate_origin_review_approval(repo, manifest_path, manifest, layers)
+    if origin_review_required(manifest):
+        validate_origin_review_approval(repo, manifest_path, manifest, layers)
     journal["status"] = "complete"
     write_journal(output, journal)
     return journal

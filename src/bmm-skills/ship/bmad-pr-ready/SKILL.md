@@ -35,6 +35,29 @@ exclude local process artifacts, create safety refs, and push with exact leases.
 
 <workflow>
 
+<critical>
+**Default-branch freshness invariant.** Per-layer and integration validation are only valid against
+the exact default-branch commit the stack was cascaded onto. The default branch keeps moving while
+reviews are in flight, so that evidence goes stale on someone else's merge, not on any change of
+yours.
+
+Therefore: **re-cascade onto the current default-branch head, and re-validate, before stack review,
+before submitting or refreshing PR bodies, and before merging.** Treat a cascade as expiring the
+moment the default branch advances past the base it recorded.
+
+Enforce it mechanically rather than by memory:
+- Record the default-branch base SHA the cascade ran against in the cascade report, the integration
+  PR body, and any validation evidence artifact.
+- Before review/submit/merge, compare that recorded SHA against the live default-branch head. If they
+  differ, the stack is stale: re-cascade and re-validate before proceeding.
+- Never present per-layer green earned on a stale base as current evidence, and never restate a prior
+  run's pass counts as if they still hold.
+
+This is a standing invariant, not a one-time fix. A stack held open across many reviews will need
+this repeatedly; that recurring cost is a reason to land lower layers promptly rather than hold the
+whole chain open.
+</critical>
+
 <step n="1" goal="Establish immutable source and target topology">
   <action>Require a clean worktree and the project's stacked-branching rule. Fetch the canonical
   upstream default branch and every origin source head. Never rewrite a source implementation
@@ -61,9 +84,25 @@ exclude local process artifacts, create safety refs, and push with exact leases.
 </step>
 
 <step n="3" goal="Remove local process machinery without losing upstream code">
-  <action>Exclude newly introduced `_bmad/**`, `_bmad-output/**`, `.agents/**`, `.claude/**`,
-  `.cursor/**`, orchestration logs, generated review reports, and source prompts/specs that are not
-  intended upstream changes. Never delete a matching path that already exists in the upstream base.</action>
+  <action>`_bmad/**` and `_bmad-output/**` are exclusively this repo's local BMAD process
+  machinery (planning/implementation-artifact scratch state). They are **never** legitimate upstream
+  content under any circumstance. Exclude them from every PR-ready layer unconditionally — this
+  exclusion is absolute and does NOT fall under the "already exists in the upstream base" carve-out
+  below. If a prior PR-ready build ever leaked one of these paths into an already-published
+  `-pr-ready` branch or the upstream default branch itself, that is a bug to fix by removing it now,
+  not a precedent to preserve. Also exclude orchestration logs, generated review reports, and source
+  prompts/specs that are not intended upstream changes, using the same unconditional rule.</action>
+  <action>`.agents/**`, `.claude/**`, `.cursor/**` are treated differently: some target repos
+  intentionally vendor agent-guidance projections upstream. For these paths only, exclude newly
+  introduced content but never delete a matching path that already exists in the upstream base.</action>
+  <action>Before dropping any excluded path, search the tracked (non-excluded) source tree for real
+  inbound references to it — imports, build/config file paths, doc links, or other content that is
+  used by or points at a file under `_bmad/**` or `_bmad-output/**`. If such a reference exists, the
+  referenced artifact is not disposable process scratch; relocate it into an appropriate
+  non-underscore-prefixed location that matches the project's established convention (e.g. `docs/`,
+  or a source directory the referencing code/doc already lives in), update the referencing path(s)
+  accordingly, and only then drop the rest of the excluded directory. Record every relocation
+  (old path, new path, referencing file) in the manifest/report.</action>
   <action>If the planning layer would become empty, write one concise upstream-facing design document
   in the run directory and add it as a manifest overlay under the project's established docs convention.</action>
   <action>Make the planning PR-ready branch the stack root when it will be submitted first. Build Story
@@ -97,9 +136,35 @@ exclude local process artifacts, create safety refs, and push with exact leases.
   </check>
 </step>
 
+<critical>
+Mid-stack layers are not required to pass their own checks. A layer that fails only because it needs
+something a LATER layer in the same stack introduces is behaving correctly for a stacked chain. The
+integration/validation branch is the single authoritative green gate — it proves the stack passes once
+merged in order.
+
+Do not reorder layers, move dependency declarations earlier, pull pin/version bumps forward, or add
+skips solely to chase a mid-stack green. That rewrites reviewed layers and discards approvals to
+chase a signal that was never the gate. Fix a failing check only when it is a genuine defect — one
+that would still fail with the entire stack merged — and fix it at its owning layer.
+
+One narrow exception: if the layer would break the DEFAULT BRANCH the moment its own PR merges, then
+pulling a declaration or pin bump earlier is the correct fix, not the prohibited one. This arises when
+the stack sits directly on the default branch, so merging a layer makes the default branch's tree
+equal to that layer's tree. Prove it before acting — check that layer out in a pristine worktree and
+run the default branch's own required checks with the exact commands CI uses — and record which class
+you invoked in the PR body and the cascade report. A feature flag does not cover this case: it gates
+runtime behavior, not an import, a lockfile, a migration, or a build step. Mid-stack green was never
+the gate; the default branch always is.
+</critical>
+
 <step n="6" goal="Validate the PR-ready stack as the submitted product">
   <action>Verify every target ends in `-pr-ready`, forms one ancestry chain from upstream, contains no
   newly introduced excluded path, and matches the sanitized source deltas plus declared overlays.</action>
+  <action>Additionally assert, as a hard unconditional invariant regardless of any prior history:
+  `git ls-tree -r --name-only &lt;target&gt;` contains zero paths matching `_bmad/**` or `_bmad-output/**`
+  for every PR-ready target in the stack. This check has no "already existed upstream" exception —
+  fail closed and report the offending branch/path if it ever matches, rather than treating a past
+  leak as acceptable baseline.</action>
   <action>Define strict argv-only tests, builds/artifact globs, and default/disabled feature-flag
   checks in an evidence config. Run `python3 {skill-root}/scripts/produce_validation_evidence.py
   &lt;applied-report&gt; &lt;config&gt; --repo {project-root} --branch &lt;evidence-branch&gt;`.
