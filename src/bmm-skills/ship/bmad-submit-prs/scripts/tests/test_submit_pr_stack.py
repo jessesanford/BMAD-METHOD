@@ -10,6 +10,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 SCRIPT = Path(__file__).parents[1] / "submit_pr_stack.py"
@@ -63,7 +64,13 @@ class SubmitterTests(unittest.TestCase):
             "_report_url": "https://example.test/blob/commit/docs/validation/feature-x.md",
         }
 
-    def write_dry_run_journal_fixture(self, directory: Path):
+    def write_dry_run_journal_fixture(
+        self,
+        directory: Path,
+        *,
+        existing_prs: dict[int, dict[str, Any]] | None = None,
+        existing_integration_pr: dict[str, Any] | None = None,
+    ) -> tuple[Path, dict[str, Any], list[dict[str, Any]], Path, dict[str, Any]]:
         body = directory / "body.md"
         body.write_text("## Summary\n\nLayer.\n", encoding="utf-8")
         layers = [
@@ -99,10 +106,22 @@ class SubmitterTests(unittest.TestCase):
         manifest_path = directory / "manifest.json"
         manifest_path.write_text("{}\n", encoding="utf-8")
         journal_path = directory / "approved-dry-run.json"
+        existing_prs = existing_prs or {}
+
+        def populate_preflight(
+            _repo: Path,
+            live_manifest: dict[str, Any],
+            live_layers: list[dict[str, Any]],
+        ) -> None:
+            for index, pr in existing_prs.items():
+                live_layers[index]["_existing_pr"] = dict(pr)
+            if existing_integration_pr is not None:
+                live_manifest["_existing_integration_pr"] = dict(existing_integration_pr)
+
         with mock.patch.object(MODULE, "gh"), mock.patch.object(
             MODULE, "create_pull_request"
         ), mock.patch.object(MODULE, "publish"), mock.patch.object(
-            MODULE, "github_preflight"
+            MODULE, "github_preflight", side_effect=populate_preflight
         ), mock.patch.object(
             MODULE, "configure_command_environment"
         ), mock.patch.object(
@@ -120,6 +139,20 @@ class SubmitterTests(unittest.TestCase):
                 manual_links=None,
             )
         return manifest_path, manifest, layers, journal_path, journal
+
+    def reset_preflight_state(
+        self,
+        manifest: dict[str, Any],
+        layers: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        manifest_copy = dict(manifest)
+        manifest_copy["integration_evidence"] = dict(manifest["integration_evidence"])
+        manifest_copy.pop("_existing_integration_pr", None)
+        manifest_copy["integration_evidence"].pop("_integration_pr_url", None)
+        layers_copy = [dict(layer) for layer in layers]
+        for layer in layers_copy:
+            layer.pop("_existing_pr", None)
+        return manifest_copy, layers_copy
 
     def test_partial_navigation_links_prior_and_marks_future(self) -> None:
         rendered = MODULE.render_navigation(
@@ -813,6 +846,7 @@ class SubmitterTests(unittest.TestCase):
             manifest_path, manifest, layers, journal_path, journal = (
                 self.write_dry_run_journal_fixture(directory)
             )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
 
             approved = MODULE.validate_approved_dry_run(
                 journal_path.resolve(),
@@ -839,12 +873,109 @@ class SubmitterTests(unittest.TestCase):
                 ),
             )
 
+    def test_validate_approved_dry_run_accepts_existing_component_links_round_trip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, journal = (
+                self.write_dry_run_journal_fixture(
+                    directory,
+                    existing_prs={
+                        0: {
+                            "number": 14,
+                            "url": "https://example.test/upstream/repo/pull/14",
+                        }
+                    },
+                )
+            )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
+            recorded_layer = journal["layers"][1]
+            self.assertIn("pr", journal["layers"][0])
+            self.assertNotEqual(
+                recorded_layer["rendered_body_sha256"],
+                MODULE.sha256_text(
+                    MODULE.render_body(
+                        layers,
+                        {},
+                        1,
+                        manifest["default_base"],
+                        manifest["feature_summary"],
+                        manifest["stack_label"],
+                        manifest["integration_evidence"],
+                        manifest["_head_owner"],
+                        manifest["feature_name"],
+                    )
+                ),
+            )
+            self.assertNotEqual(
+                journal["integration_pr"]["rendered_body_sha256"],
+                MODULE.sha256_text(MODULE.render_integration_body(manifest, layers, {})),
+            )
+
+            approved = MODULE.validate_approved_dry_run(
+                journal_path.resolve(),
+                manifest_path,
+                manifest,
+                layers,
+            )
+
+            self.assertEqual(approved["layers"][0]["pr"]["number"], 14)
+
+    def test_validate_approved_dry_run_accepts_existing_integration_pr_round_trip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, journal = (
+                self.write_dry_run_journal_fixture(
+                    directory,
+                    existing_integration_pr={
+                        "number": 90,
+                        "url": "https://example.test/upstream/repo/pull/90",
+                    },
+                )
+            )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
+            recorded_layer = journal["layers"][0]
+            self.assertIn("pr", journal["integration_pr"])
+            self.assertIn(
+                "Combined stack validation PR",
+                Path(recorded_layer["rendered_body"]).read_text(encoding="utf-8"),
+            )
+            self.assertNotEqual(
+                recorded_layer["rendered_body_sha256"],
+                MODULE.sha256_text(
+                    MODULE.render_body(
+                        layers,
+                        {},
+                        0,
+                        manifest["default_base"],
+                        manifest["feature_summary"],
+                        manifest["stack_label"],
+                        manifest["integration_evidence"],
+                        manifest["_head_owner"],
+                        manifest["feature_name"],
+                    )
+                ),
+            )
+
+            approved = MODULE.validate_approved_dry_run(
+                journal_path.resolve(),
+                manifest_path,
+                manifest,
+                layers,
+            )
+
+            self.assertEqual(approved["integration_pr"]["pr"]["number"], 90)
+
     def test_validate_approved_dry_run_rejects_sha_instead_of_branch_base(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             manifest_path, manifest, layers, journal_path, _journal = (
                 self.write_dry_run_journal_fixture(directory)
             )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
             payload = json.loads(journal_path.read_text(encoding="utf-8"))
             payload["layers"][1]["base"] = layers[1]["_base_sha"]
             journal_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -867,6 +998,7 @@ class SubmitterTests(unittest.TestCase):
             manifest_path, manifest, layers, journal_path, _journal = (
                 self.write_dry_run_journal_fixture(directory)
             )
+            manifest, layers = self.reset_preflight_state(manifest, layers)
             approval = {
                 "apply_request": str(directory / "apply-request.json"),
                 "apply_request_sha256": "a" * 64,

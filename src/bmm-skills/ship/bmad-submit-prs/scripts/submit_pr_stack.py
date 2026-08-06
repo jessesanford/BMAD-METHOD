@@ -1679,21 +1679,50 @@ def validate_approved_dry_run(
     recorded_layers = journal.get("layers")
     if not isinstance(recorded_layers, list) or len(recorded_layers) != len(layers):
         raise SubmitError("approved dry-run journal has the wrong layer count")
-    approved_component_bodies: list[str] = []
-    for index, (layer, recorded) in enumerate(zip(layers, recorded_layers)):
+    integration = journal.get("integration_pr")
+    if not isinstance(integration, dict):
+        raise SubmitError("approved dry-run journal integration proof changed")
+    recorded_links: dict[int, dict[str, Any]] = {}
+    for index, recorded in enumerate(recorded_layers):
         if not isinstance(recorded, dict):
             raise SubmitError("approved dry-run journal contains a malformed layer")
+        recorded_pr = recorded.get("pr")
+        if recorded_pr is None:
+            continue
+        if (
+            not isinstance(recorded_pr, dict)
+            or type(recorded_pr.get("number")) is not int
+            or not isinstance(recorded_pr.get("url"), str)
+        ):
+            raise SubmitError(f"approved dry-run journal layer {index + 1} PR changed")
+        recorded_links[index] = {
+            "number": recorded_pr["number"],
+            "url": recorded_pr["url"],
+        }
+    expected_integration_evidence = dict(manifest["integration_evidence"])
+    expected_integration_evidence.pop("_integration_pr_url", None)
+    integration_pr = integration.get("pr")
+    if integration_pr is not None:
+        if (
+            not isinstance(integration_pr, dict)
+            or type(integration_pr.get("number")) is not int
+            or not isinstance(integration_pr.get("url"), str)
+        ):
+            raise SubmitError("approved dry-run journal integration PR changed")
+        expected_integration_evidence["_integration_pr_url"] = integration_pr["url"]
+    approved_component_bodies: list[str] = []
+    for index, (layer, recorded) in enumerate(zip(layers, recorded_layers)):
         expected_title = stacked_title(
             layer, index, len(layers), manifest["stack_label"]
         )
         expected_body = render_body(
             layers,
-            {},
+            recorded_links,
             index,
             manifest["default_base"],
             manifest["feature_summary"],
             manifest["stack_label"],
-            manifest["integration_evidence"],
+            expected_integration_evidence,
             manifest["_head_owner"],
             manifest["feature_name"],
         )
@@ -1731,10 +1760,8 @@ def validate_approved_dry_run(
                 raise SubmitError(f"approved dry-run journal {field} changed")
             if field == "rendered_body":
                 approved_component_bodies.append(artifact_text)
-    integration = journal.get("integration_pr")
     if (
-        not isinstance(integration, dict)
-        or integration.get("branch") != manifest["integration_evidence"]["branch"]
+        integration.get("branch") != manifest["integration_evidence"]["branch"]
         or integration.get("tip") != manifest["integration_evidence"]["_commit"]
         or integration.get("draft") is not True
         or integration.get("merge") != "prohibited"
@@ -1745,7 +1772,7 @@ def validate_approved_dry_run(
         or integration.get("rendered_title_sha256")
         != sha256_text(manifest["_integration_layer"]["title"] + "\n")
         or integration.get("rendered_body_sha256")
-        != sha256_text(render_integration_body(manifest, layers, {}))
+        != sha256_text(render_integration_body(manifest, layers, recorded_links))
     ):
         raise SubmitError("approved dry-run journal integration proof changed")
     approved_integration_body = ""
