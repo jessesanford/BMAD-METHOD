@@ -2789,25 +2789,28 @@ def submit(
                 "regenerated upstream dry run requires no pre-existing upstream PRs"
             )
         if apply and approved_journal is not None:
-            prior_layers = prior_progress.get("layers", []) if prior_progress else []
+            prior_layers = (
+                prior_progress.get("layers", []) if prior_progress is not None else []
+            )
             for index, layer in enumerate(layers):
                 live = layer.get("_existing_pr")
-                recorded = (
-                    prior_layers[index].get("pr")
-                    if index < len(prior_layers)
-                    and isinstance(prior_layers[index], dict)
-                    else None
-                )
-                if bool(live) != bool(recorded) or (
-                    live
-                    and (
-                        live["number"] != recorded.get("number")
-                        or live["url"] != recorded.get("url")
+                if prior_progress is not None:
+                    recorded = (
+                        prior_layers[index].get("pr")
+                        if index < len(prior_layers)
+                        and isinstance(prior_layers[index], dict)
+                        else None
                     )
-                ):
-                    raise SubmitError(
-                        "live upstream component PRs do not match the sealed apply journal"
-                    )
+                    if bool(live) != bool(recorded) or (
+                        live
+                        and (
+                            live["number"] != recorded.get("number")
+                            or live["url"] != recorded.get("url")
+                        )
+                    ):
+                        raise SubmitError(
+                            "live upstream component PRs do not match the sealed apply journal"
+                        )
                 if live:
                     verify_pull_request(
                         repo,
@@ -2822,21 +2825,18 @@ def submit(
                         approved_journal["_approved_component_bodies"][index],
                     )
             live_integration = manifest.get("_existing_integration_pr")
-            prior_integration = (
-                prior_progress.get("integration_pr", {}).get("pr")
-                if prior_progress
-                else None
-            )
-            if bool(live_integration) != bool(prior_integration) or (
-                live_integration
-                and (
-                    live_integration["number"] != prior_integration.get("number")
-                    or live_integration["url"] != prior_integration.get("url")
-                )
-            ):
-                raise SubmitError(
-                    "live integration PR does not match the sealed apply journal"
-                )
+            if prior_progress is not None:
+                prior_integration = prior_progress.get("integration_pr", {}).get("pr")
+                if bool(live_integration) != bool(prior_integration) or (
+                    live_integration
+                    and (
+                        live_integration["number"] != prior_integration.get("number")
+                        or live_integration["url"] != prior_integration.get("url")
+                    )
+                ):
+                    raise SubmitError(
+                        "live integration PR does not match the sealed apply journal"
+                    )
             if live_integration:
                 verify_integration_pull_request(
                     repo,
