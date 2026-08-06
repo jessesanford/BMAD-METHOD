@@ -1701,7 +1701,8 @@ def validate_approved_dry_run(
             recorded.get("branch") != layer["branch"]
             or recorded.get("remote_branch") != layer["remote_branch"]
             or recorded.get("tip") != layer["_tip"]
-            or recorded.get("base") != layer["_base_sha"]
+            or recorded.get("base")
+            != component_base(layers, index, manifest["default_base"])
             or recorded.get("head") != layer["_head_ref"]
             or recorded.get("title") != expected_title
             or recorded.get("source_title") != layer["title"]

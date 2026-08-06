@@ -63,6 +63,64 @@ class SubmitterTests(unittest.TestCase):
             "_report_url": "https://example.test/blob/commit/docs/validation/feature-x.md",
         }
 
+    def write_dry_run_journal_fixture(self, directory: Path):
+        body = directory / "body.md"
+        body.write_text("## Summary\n\nLayer.\n", encoding="utf-8")
+        layers = [
+            {
+                "branch": f"stack/{name}-pr-ready",
+                "remote_branch": f"stack/{name}-pr-ready",
+                "_head_ref": f"stack/{name}-pr-ready",
+                "_tip": str(index + 1) * 40,
+                "_base_sha": "0" * 40 if index == 0 else str(index) * 40,
+                "_body_file": body,
+                "title": f"feat: {name}",
+                "summary": name,
+            }
+            for index, name in enumerate(("plan", "story-1.1", "story-1.2"))
+        ]
+        manifest = {
+            "repository": "github.example.com/upstream/repo",
+            "default_base": "main",
+            "base_sha": "0" * 40,
+            "feature_name": "Feature X",
+            "feature_summary": "Adds focused behavior.",
+            "stack_label": "feature-x",
+            "evidence_remote": "origin",
+            "template_source": ".github/PULL_REQUEST_TEMPLATE.md",
+            "integration_evidence": dict(self.evidence),
+            "_head_repository": "github.example.com/upstream/repo",
+            "_head_owner": "upstream",
+            "_evidence_owner": "fork-owner",
+            "_evidence_repository": "github.example.com/fork-owner/repo",
+            "_evidence_cross_repository": False,
+        }
+        manifest["_integration_layer"] = MODULE.integration_layer(manifest)
+        manifest_path = directory / "manifest.json"
+        manifest_path.write_text("{}\n", encoding="utf-8")
+        journal_path = directory / "approved-dry-run.json"
+        with mock.patch.object(MODULE, "gh"), mock.patch.object(
+            MODULE, "create_pull_request"
+        ), mock.patch.object(MODULE, "publish"), mock.patch.object(
+            MODULE, "github_preflight"
+        ), mock.patch.object(
+            MODULE, "configure_command_environment"
+        ), mock.patch.object(
+            MODULE, "validate", return_value=layers
+        ), mock.patch.object(
+            MODULE, "load_manifest", return_value=manifest
+        ):
+            journal = MODULE.submit(
+                directory,
+                manifest_path,
+                apply=False,
+                manual=False,
+                output=journal_path,
+                rendered_dir=directory / "rendered",
+                manual_links=None,
+            )
+        return manifest_path, manifest, layers, journal_path, journal
+
     def test_partial_navigation_links_prior_and_marks_future(self) -> None:
         rendered = MODULE.render_navigation(
             self.layers,
@@ -746,6 +804,93 @@ class SubmitterTests(unittest.TestCase):
         publish_mock.assert_not_called()
         create_mock.assert_not_called()
         gh_mock.assert_not_called()
+
+    def test_validate_approved_dry_run_accepts_real_dry_run_journal_round_trip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, journal = (
+                self.write_dry_run_journal_fixture(directory)
+            )
+
+            approved = MODULE.validate_approved_dry_run(
+                journal_path.resolve(),
+                manifest_path,
+                manifest,
+                layers,
+            )
+
+            self.assertEqual(
+                [layer["base"] for layer in approved["layers"]],
+                ["main", "stack/plan-pr-ready", "stack/story-1.1-pr-ready"],
+            )
+            self.assertEqual(
+                approved["_approved_component_bodies"],
+                [
+                    Path(layer["rendered_body"]).read_text(encoding="utf-8")
+                    for layer in journal["layers"]
+                ],
+            )
+            self.assertEqual(
+                approved["_approved_integration_body"],
+                Path(journal["integration_pr"]["rendered_body"]).read_text(
+                    encoding="utf-8"
+                ),
+            )
+
+    def test_validate_approved_dry_run_rejects_sha_instead_of_branch_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, _journal = (
+                self.write_dry_run_journal_fixture(directory)
+            )
+            payload = json.loads(journal_path.read_text(encoding="utf-8"))
+            payload["layers"][1]["base"] = layers[1]["_base_sha"]
+            journal_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                MODULE.SubmitError, "approved dry-run journal layer topology changed"
+            ):
+                MODULE.validate_approved_dry_run(
+                    journal_path.resolve(),
+                    manifest_path,
+                    manifest,
+                    layers,
+                )
+
+    def test_load_apply_progress_accepts_branch_bases_from_persisted_journal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest_path, manifest, layers, journal_path, _journal = (
+                self.write_dry_run_journal_fixture(directory)
+            )
+            approval = {
+                "apply_request": str(directory / "apply-request.json"),
+                "apply_request_sha256": "a" * 64,
+                "preparation_receipt": str(directory / "preparation-receipt.json"),
+                "preparation_receipt_sha256": "b" * 64,
+            }
+            progress = json.loads(journal_path.read_text(encoding="utf-8"))
+            progress["status"] = "submitting"
+            progress["apply_approval"] = approval
+            progress_path = directory / "apply-progress.json"
+            MODULE.write_journal(progress_path, progress)
+
+            loaded = MODULE.load_apply_progress(
+                progress_path,
+                manifest_path,
+                manifest,
+                layers,
+                approval,
+            )
+
+            self.assertEqual(
+                [layer["base"] for layer in loaded["layers"]],
+                ["main", "stack/plan-pr-ready", "stack/story-1.1-pr-ready"],
+            )
 
     @mock.patch.object(MODULE, "git", return_value="")
     @mock.patch.object(MODULE, "validate_remote_urls")
