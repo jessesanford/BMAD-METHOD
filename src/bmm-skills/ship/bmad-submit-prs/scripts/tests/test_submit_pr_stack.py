@@ -1798,7 +1798,7 @@ class SubmitterTests(unittest.TestCase):
                                            {"_tip": "final", "remote_branch": "two"}],
                 )
 
-    def test_verify_pull_request_rejects_removed_or_drifted_evidence_section(self) -> None:
+    def test_verify_pull_request_rejects_incomplete_expected_evidence_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             body_file = Path(temporary) / "body.md"
             body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
@@ -1830,7 +1830,11 @@ class SubmitterTests(unittest.TestCase):
             _, after = remainder.split(navigation, 1)
             bodies = {
                 "removed": before + navigation + after,
-                "drifted": expected.replace("42 passed", "41 passed", 1),
+                "missing report link": expected.replace(
+                    self.evidence["_report_url"],
+                    "https://example.test/changed-report",
+                    1,
+                ),
             }
             for name, body in bodies.items():
                 with self.subTest(name=name), mock.patch.object(
@@ -1847,11 +1851,332 @@ class SubmitterTests(unittest.TestCase):
                         },
                         "body": body,
                     }),
-                ), self.assertRaisesRegex(MODULE.SubmitError, "PR body drifted"):
+                ), self.assertRaisesRegex(
+                    MODULE.SubmitError, "PR evidence is incomplete"
+                ):
                     MODULE.verify_pull_request(
                         Path.cwd(), manifest, layers, links, 1, layers[1], "main",
-                        {"number": 42}, True, expected
+                        {"number": 42}, True, body
                     )
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_pull_request_updates_stale_title_and_body_in_place(
+        self,
+        api_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [
+                dict(layer, _tip=str(index + 1) * 40, _body_file=body_file)
+                for index, layer in enumerate(self.layers)
+            ]
+            links = {
+                0: {"number": 41, "url": "https://example.test/pull/41"},
+                1: {"number": 42, "url": "https://example.test/pull/42"},
+            }
+            manifest = {
+                "repository": "example.test/owner/repo",
+                "_head_owner": "contributor",
+                "default_base": "main",
+                "base_sha": "0" * 40,
+                "stack_label": "feature-x",
+                "feature_name": "Feature X",
+                "feature_summary": "Focused change.",
+                "integration_evidence": self.evidence,
+                "draft": False,
+            }
+            expected = MODULE.render_body(
+                layers,
+                links,
+                1,
+                "main",
+                "Focused change.",
+                "feature-x",
+                self.evidence,
+                "contributor",
+                "Feature X",
+            )
+            api_mock.side_effect = [
+                json.dumps(
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": "stale title",
+                        "base": {"ref": "main", "sha": layers[0]["_tip"]},
+                        "head": {
+                            "ref": layers[1]["remote_branch"],
+                            "sha": layers[1]["_tip"],
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": "stale body",
+                    }
+                ),
+                "",
+            ]
+
+            MODULE.verify_pull_request(
+                Path.cwd(),
+                manifest,
+                layers,
+                links,
+                1,
+                layers[1],
+                "main",
+                {"number": 42},
+                True,
+                expected,
+                allow_editorial_sync=True,
+            )
+
+        self.assertEqual(len(api_mock.call_args_list), 2)
+        patch_call = api_mock.call_args_list[1]
+        self.assertEqual(
+            patch_call.args[:3],
+            (
+                Path.cwd(),
+                "example.test/owner/repo",
+                "repos/owner/repo/pulls/42",
+            ),
+        )
+        self.assertEqual(
+            patch_call.args[3:],
+            ("--method", "PATCH", "-f", f"title={MODULE.stacked_title(layers[1], 1, 2, 'feature-x')}", "-f", f"body={expected}"),
+        )
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_pull_request_accepts_already_ready_pr_and_refreshes_editorial_content(
+        self,
+        api_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [
+                dict(layer, _tip=str(index + 1) * 40, _body_file=body_file)
+                for index, layer in enumerate(self.layers)
+            ]
+            links = {0: {"number": 41, "url": "https://example.test/pull/41"}}
+            manifest = {
+                "repository": "example.test/owner/repo",
+                "_head_owner": "contributor",
+                "default_base": "main",
+                "base_sha": "0" * 40,
+                "stack_label": "feature-x",
+                "feature_name": "Feature X",
+                "feature_summary": "Focused change.",
+                "integration_evidence": self.evidence,
+                "draft": False,
+            }
+            expected = MODULE.render_body(
+                layers,
+                links,
+                0,
+                "main",
+                "Focused change.",
+                "feature-x",
+                self.evidence,
+                "contributor",
+                "Feature X",
+            )
+            api_mock.side_effect = [
+                json.dumps(
+                    {
+                        "state": "open",
+                        "draft": False,
+                        "title": "old ready title",
+                        "base": {"ref": "main", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": layers[0]["_tip"],
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": "old ready body",
+                    }
+                ),
+                "",
+            ]
+
+            MODULE.verify_pull_request(
+                Path.cwd(),
+                manifest,
+                layers,
+                links,
+                0,
+                layers[0],
+                "main",
+                {"number": 41},
+                True,
+                expected,
+                allow_editorial_sync=True,
+            )
+
+        self.assertEqual(len(api_mock.call_args_list), 2)
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_pull_request_still_rejects_structural_mismatch(self, api_mock: mock.Mock) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            body_file = Path(temporary) / "body.md"
+            body_file.write_text("## Summary\n\nFocused change.\n", encoding="utf-8")
+            layers = [
+                dict(layer, _tip=str(index + 1) * 40, _body_file=body_file)
+                for index, layer in enumerate(self.layers)
+            ]
+            manifest = {
+                "repository": "example.test/owner/repo",
+                "_head_owner": "contributor",
+                "default_base": "main",
+                "base_sha": "0" * 40,
+                "stack_label": "feature-x",
+                "feature_name": "Feature X",
+                "feature_summary": "Focused change.",
+                "integration_evidence": self.evidence,
+                "draft": False,
+            }
+            expected = MODULE.render_body(
+                layers,
+                {},
+                0,
+                "main",
+                "Focused change.",
+                "feature-x",
+                self.evidence,
+                "contributor",
+                "Feature X",
+            )
+            cases = (
+                (
+                    "head sha",
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": MODULE.stacked_title(layers[0], 0, 2, "feature-x"),
+                        "base": {"ref": "main", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": "9" * 40,
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": expected,
+                    },
+                    "headRefOid",
+                ),
+                (
+                    "base",
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": MODULE.stacked_title(layers[0], 0, 2, "feature-x"),
+                        "base": {"ref": "release", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": layers[0]["_tip"],
+                            "repo": {"owner": {"login": "contributor"}},
+                        },
+                        "body": expected,
+                    },
+                    "baseRefName",
+                ),
+                (
+                    "owner",
+                    {
+                        "state": "open",
+                        "draft": True,
+                        "title": MODULE.stacked_title(layers[0], 0, 2, "feature-x"),
+                        "base": {"ref": "main", "sha": "0" * 40},
+                        "head": {
+                            "ref": layers[0]["remote_branch"],
+                            "sha": layers[0]["_tip"],
+                            "repo": {"owner": {"login": "fork-owner"}},
+                        },
+                        "body": expected,
+                    },
+                    "headRepositoryOwner",
+                ),
+            )
+            for name, payload, field in cases:
+                with self.subTest(name=name):
+                    api_mock.reset_mock()
+                    api_mock.return_value = json.dumps(payload)
+                    with self.assertRaisesRegex(
+                        MODULE.SubmitError, f"submitted PR state mismatch.*{field}"
+                    ):
+                        MODULE.verify_pull_request(
+                            Path.cwd(),
+                            manifest,
+                            layers,
+                            {},
+                            0,
+                            layers[0],
+                            "main",
+                            {"number": 41},
+                            True,
+                            expected,
+                        )
+                    self.assertEqual(api_mock.call_count, 1)
+
+    @mock.patch.object(MODULE, "gh_api")
+    def test_verify_integration_pull_request_updates_stale_title_and_body_in_place(
+        self,
+        api_mock: mock.Mock,
+    ) -> None:
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "default_base": "main",
+            "base_sha": "0" * 40,
+            "feature_name": "Feature X",
+            "stack_label": "feature-x",
+            "_evidence_owner": "contributor",
+            "integration_evidence": self.evidence,
+        }
+        manifest["_integration_layer"] = MODULE.integration_layer(
+            {
+                **manifest,
+                "integration_evidence": {
+                    **self.evidence,
+                    "branch": self.evidence["branch"],
+                    "_commit": self.evidence["_commit"],
+                },
+            }
+        )
+        layers = [
+            {"title": "docs: plan feature", "summary": "Feature plan.", "remote_branch": "stack/plan-pr-ready", "_tip": "1" * 40},
+            {"title": "feat: implement feature", "summary": "Implementation.", "remote_branch": "stack/story-pr-ready", "_tip": "2" * 40},
+        ]
+        expected = MODULE.render_integration_body(
+            manifest,
+            layers,
+            {0: {"number": 41, "url": "https://example.test/pull/41"}},
+        )
+        api_mock.side_effect = [
+            json.dumps(
+                {
+                    "state": "open",
+                    "draft": True,
+                    "title": "stale integration title",
+                    "base": {"ref": "main", "sha": "0" * 40},
+                    "head": {
+                        "ref": manifest["_integration_layer"]["remote_branch"],
+                        "sha": manifest["_integration_layer"]["_tip"],
+                        "repo": {"owner": {"login": "contributor"}},
+                    },
+                    "body": "stale integration body",
+                }
+            ),
+            "",
+        ]
+
+        MODULE.verify_integration_pull_request(
+            Path.cwd(),
+            manifest,
+            layers,
+            {0: {"number": 41, "url": "https://example.test/pull/41"}},
+            {"number": 90},
+            expected,
+            allow_editorial_sync=True,
+        )
+
+        self.assertEqual(len(api_mock.call_args_list), 2)
 
     def test_pr_111_fallback_headings_are_exact_and_ordered(self) -> None:
         template = Path(

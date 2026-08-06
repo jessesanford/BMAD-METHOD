@@ -2433,7 +2433,22 @@ def verify_pull_request(
     pr: dict[str, Any],
     expected_draft: bool | None,
     expected_body: str,
+    *,
+    allow_editorial_sync: bool = False,
 ) -> None:
+    def patch_pull_request(*, title: str | None = None, body: str | None = None) -> None:
+        arguments = ["--method", "PATCH"]
+        if title is not None:
+            arguments.extend(["-f", f"title={title}"])
+        if body is not None:
+            arguments.extend(["-f", f"body={body}"])
+        gh_api(
+            repo,
+            manifest["repository"],
+            f"repos/{owner}/{name}/pulls/{pr['number']}",
+            *arguments,
+        )
+
     _, owner, name = split_repository(manifest["repository"])
     payload = json.loads(
         gh_api(
@@ -2461,16 +2476,38 @@ def verify_pull_request(
         "headRefName": layer["remote_branch"],
         "headRefOid": layer["_tip"],
     }
-    if expected_draft is not None:
-        expected["isDraft"] = expected_draft
-    mismatches = [key for key, value in expected.items() if state.get(key) != value]
+    mismatches = [
+        key
+        for key in (
+            "state",
+            "baseRefName",
+            "baseRefOid",
+            "headRefName",
+            "headRefOid",
+        )
+        if state.get(key) != expected[key]
+    ]
     if state["headRepositoryOwner"].casefold() != manifest["_head_owner"].casefold():
         mismatches.append("headRepositoryOwner")
+    if expected_draft is not None and state["isDraft"] != expected_draft:
+        already_ready = (
+            expected_draft is True
+            and state["isDraft"] is False
+            and not bool(manifest.get("draft"))
+        )
+        if not already_ready:
+            mismatches.append("isDraft")
     if mismatches:
-        raise SubmitError(f"submitted PR state mismatch for {layer['remote_branch']}: {', '.join(mismatches)}")
-    body = state.get("body") or ""
-    if body != expected_body:
+        raise SubmitError(
+            f"submitted PR state mismatch for {layer['remote_branch']}: {', '.join(mismatches)}"
+        )
+    if allow_editorial_sync and (
+        state["title"] != expected["title"] or state["body"] != expected_body
+    ):
+        patch_pull_request(title=expected["title"], body=expected_body)
+    elif state["title"] != expected["title"] or state["body"] != expected_body:
         raise SubmitError(f"submitted PR body drifted for {layer['remote_branch']}")
+    body = expected_body
     evidence = manifest["integration_evidence"]
     required_body_content = (
         MARKER,
@@ -2493,7 +2530,22 @@ def verify_integration_pull_request(
     links: dict[int, dict[str, Any]],
     pr: dict[str, Any],
     expected_body: str,
+    *,
+    allow_editorial_sync: bool = False,
 ) -> None:
+    def patch_pull_request(*, title: str | None = None, body: str | None = None) -> None:
+        arguments = ["--method", "PATCH"]
+        if title is not None:
+            arguments.extend(["-f", f"title={title}"])
+        if body is not None:
+            arguments.extend(["-f", f"body={body}"])
+        gh_api(
+            repo,
+            manifest["repository"],
+            f"repos/{owner}/{name}/pulls/{pr['number']}",
+            *arguments,
+        )
+
     _, owner, name = split_repository(manifest["repository"])
     payload = json.loads(
         gh_api(
@@ -2523,10 +2575,11 @@ def verify_integration_pull_request(
         "sha": payload["head"]["sha"],
         "owner": payload["head"]["repo"]["owner"]["login"].casefold(),
     }
-    mismatches = [field for field, value in expected.items() if actual[field] != value]
-    body = payload.get("body") or ""
-    if body != expected_body:
-        mismatches.append("body")
+    mismatches = [
+        field
+        for field in ("state", "draft", "base", "baseSha", "head", "sha", "owner")
+        if actual[field] != expected[field]
+    ]
     required = (
         "> **Combined stack validation PR - DO NOT MERGE**",
         "## Component PRs",
@@ -2534,12 +2587,19 @@ def verify_integration_pull_request(
         manifest["integration_evidence"]["_branch_url"],
         manifest["integration_evidence"]["_report_url"],
     )
-    if any(value not in body for value in required):
-        mismatches.append("body")
     if mismatches:
         raise SubmitError(
             "combined-stack validation PR mismatch: " + ", ".join(mismatches)
         )
+    if allow_editorial_sync and (
+        actual["title"] != expected["title"] or (payload.get("body") or "") != expected_body
+    ):
+        patch_pull_request(title=expected["title"], body=expected_body)
+    elif actual["title"] != expected["title"] or (payload.get("body") or "") != expected_body:
+        raise SubmitError("combined-stack validation PR mismatch: title, body")
+    body = expected_body
+    if any(value not in body for value in required):
+        raise SubmitError("combined-stack validation PR mismatch: body")
 
 
 def finalize_draft_state(
@@ -2823,6 +2883,7 @@ def submit(
                         live,
                         True,
                         approved_journal["_approved_component_bodies"][index],
+                        allow_editorial_sync=True,
                     )
             live_integration = manifest.get("_existing_integration_pr")
             if prior_progress is not None:
@@ -2845,6 +2906,7 @@ def submit(
                     links,
                     live_integration,
                     approved_journal["_approved_integration_body"],
+                    allow_editorial_sync=True,
                 )
     else:
         github_repository_preflight(repo, manifest)
@@ -3177,6 +3239,7 @@ def submit(
             links[index],
             None,
             approved_component_bodies[index],
+            allow_editorial_sync=True,
         )
     verify_integration_pull_request(
         repo,
@@ -3185,6 +3248,7 @@ def submit(
         links,
         integration_pr,
         approved_integration_body,
+        allow_editorial_sync=True,
     )
 
     if remote_sha(repo, manifest["target_remote"], manifest["default_base"]) != manifest["base_sha"]:
@@ -3210,6 +3274,7 @@ def submit(
             links[index],
             bool(manifest.get("draft")),
             approved_component_bodies[index],
+            allow_editorial_sync=True,
         )
     verify_integration_pull_request(
         repo,
@@ -3218,6 +3283,7 @@ def submit(
         links,
         integration_pr,
         approved_integration_body,
+        allow_editorial_sync=True,
     )
     if origin_review_required(manifest):
         validate_origin_review_approval(repo, manifest_path, manifest, layers)

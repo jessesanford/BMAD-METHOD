@@ -151,7 +151,8 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   journal and request to
   `--apply --approved-dry-run-journal <journal> --approved-apply-request <request>`.
   Manual submission requires the same sealed inputs. Automatic apply preserves reviewed title/body
-  bytes and adds newly discovered PR navigation as comments.
+  bytes, refreshes matching existing OPEN PRs in place when only editorial content drifted, and
+  adds newly discovered PR navigation as comments.
   Existing upstream PRs are rejected
   because none existed in the approved dry run. Never reuse the pre-origin-review package.
 - New automatic PRs are staged as drafts until every body and graph is finalized. Set `draft: true`

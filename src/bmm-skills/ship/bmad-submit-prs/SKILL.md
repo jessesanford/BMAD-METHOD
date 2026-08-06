@@ -193,14 +193,18 @@ whole chain open.
   `--approved-apply-request` is not required and is ignored (the prepare/seal ceremony is
   fork-only). The submitter independently revalidates the approved dry-run journal and current
   source/PR-ready placement immediately before mutation, submits the reviewed title/body bytes
-  exactly, and places live PR navigation in comments rather than rewriting approved bodies. It
+  exactly, and places live PR navigation in comments rather than appending ad hoc body edits. It
   then preflights all remote and GitHub invariants before side effects, publishes exact SHAs to
   the publish remote with force-with-lease, and creates every PR against its per-layer base.
   Create new PRs as drafts so none becomes reviewable before its warning and links are
   complete.</action>
-  <action>Reuse an open PR only when head and base match; refuse closed, duplicate, or mismatched state.
-  Persist after each success. Retry transient reads and idempotent writes with bounded backoff, but
-  leave ambiguous creates to an idempotent rerun that reconciles remote state from the journal.</action>
+  <action>Reuse an open PR only when head and base still match the regenerated stack, it remains OPEN,
+  and it still belongs to the expected owner. When those structural invariants hold, refresh its
+  title/body in place to the newly approved bytes on rerun; if a component PR is already ready from
+  a prior successful cycle and the manifest's final target state is ready, treat that as already
+  advanced instead of forcing it back to draft. Persist after each success. Retry transient reads
+  and idempotent writes with bounded backoff, but leave ambiguous creates to an idempotent rerun
+  that reconciles remote state from the journal.</action>
   <action>During sequential creation, prior PR titles and graph nodes are clickable and future nodes
   are marked pending. Explain stacked PRs with a link to `https://www.stacking.dev/`. After all PRs
   exist, preserve every approved body and add one marker comment per PR with the complete linked graph
