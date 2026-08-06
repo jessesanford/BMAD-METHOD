@@ -144,6 +144,12 @@ whole chain open.
     Report the exact failed invariant before branch publication or PR creation. Ask the user to
     correct upstream state or stop safely; never choose another target or silently flatten the stack.
   </check>
+  <action>If a layer's head has a CLOSED PR that cannot legitimately be reused (for example GitHub
+  permanently refuses to reopen a PR whose head branch was force-pushed after closing), do not
+  silently work around it. Confirm with the human that the old PR should remain closed as historical
+  record and that a fresh PR should be created for that head, then record its number in that layer's
+  manifest `superseded_prs`. Never add a number to that list to bypass a routine "PR already exists"
+  conflict — only for a confirmed unreopenable-PR case.</action>
 </step>
 
 <step n="4" goal="Submit or update the stack in dependency order">

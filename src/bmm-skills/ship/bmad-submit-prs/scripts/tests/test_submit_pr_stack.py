@@ -700,6 +700,151 @@ class SubmitterTests(unittest.TestCase):
     @mock.patch.object(MODULE, "remote_sha", return_value=None)
     @mock.patch.object(MODULE, "pull_requests_for_head")
     @mock.patch.object(MODULE, "github_repository_preflight")
+    def test_preflight_ignores_superseded_closed_pr_for_its_head(
+        self,
+        _repository_mock: mock.Mock,
+        pulls_mock: mock.Mock,
+        remote_mock: mock.Mock,
+        _integration_mock: mock.Mock,
+    ) -> None:
+        """A permanently-closed PR (e.g. unreopenable after a force-push) that is explicitly
+        listed as superseded must not block preflight for a fresh PR on the same head."""
+        pulls_mock.return_value = [
+            {
+                "number": 33,
+                "url": "https://example.test/upstream/repo/pull/33",
+                "state": "CLOSED",
+                "isDraft": False,
+                "baseRefName": "stack/plan-pr-ready",
+                "baseRefOid": "z" * 40,
+                "headRefOid": "b" * 40,
+                "headRepositoryOwner": "upstream",
+            }
+        ]
+        layers = [
+            {
+                "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "stack/plan-pr-ready",
+                "_tip": "a" * 40,
+                "_superseded_prs": set(),
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "stack/story-pr-ready",
+                "_tip": "b" * 40,
+                "_superseded_prs": {33},
+            },
+        ]
+        manifest = {
+            "repository": "example.test/upstream/repo",
+            "_head_owner": "upstream",
+            "publish_remote": "upstream",
+            "default_base": "main",
+            "base_sha": "a" * 40,
+            "draft": True,
+        }
+        pulls_mock.side_effect = [[], pulls_mock.return_value]
+        remote_mock.side_effect = ["a" * 40, "b" * 40]
+
+        MODULE.github_preflight(Path.cwd(), manifest, layers)
+        self.assertNotIn("_existing_pr", layers[1])
+
+    @mock.patch.object(MODULE, "preflight_integration_pull_request")
+    @mock.patch.object(MODULE, "remote_sha", return_value=None)
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    @mock.patch.object(MODULE, "github_repository_preflight")
+    def test_preflight_rejects_superseded_prs_that_are_still_open(
+        self,
+        _repository_mock: mock.Mock,
+        pulls_mock: mock.Mock,
+        remote_mock: mock.Mock,
+        _integration_mock: mock.Mock,
+    ) -> None:
+        """superseded_prs must never silently bypass a live, still-open competing PR."""
+        pulls_mock.return_value = [
+            {
+                "number": 33,
+                "url": "https://example.test/upstream/repo/pull/33",
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "stack/plan-pr-ready",
+                "baseRefOid": "z" * 40,
+                "headRefOid": "b" * 40,
+                "headRepositoryOwner": "upstream",
+            }
+        ]
+        layers = [
+            {
+                "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "stack/plan-pr-ready",
+                "_tip": "a" * 40,
+                "_superseded_prs": set(),
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "stack/story-pr-ready",
+                "_tip": "b" * 40,
+                "_superseded_prs": {33},
+            },
+        ]
+        manifest = {
+            "repository": "example.test/upstream/repo",
+            "_head_owner": "upstream",
+            "publish_remote": "upstream",
+            "default_base": "main",
+            "base_sha": "a" * 40,
+            "draft": True,
+        }
+        pulls_mock.side_effect = [[], pulls_mock.return_value]
+        remote_mock.return_value = "a" * 40
+
+        with self.assertRaisesRegex(MODULE.SubmitError, "still-OPEN"):
+            MODULE.github_preflight(Path.cwd(), manifest, layers)
+
+    @mock.patch.object(MODULE, "preflight_integration_pull_request")
+    @mock.patch.object(MODULE, "remote_sha", return_value=None)
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    @mock.patch.object(MODULE, "github_repository_preflight")
+    def test_preflight_rejects_superseded_pr_number_that_does_not_exist(
+        self,
+        _repository_mock: mock.Mock,
+        pulls_mock: mock.Mock,
+        remote_mock: mock.Mock,
+        _integration_mock: mock.Mock,
+    ) -> None:
+        """A stale/mistyped superseded_prs entry that matches no PR fails closed."""
+        layers = [
+            {
+                "remote_branch": "stack/plan-pr-ready",
+                "_head_ref": "stack/plan-pr-ready",
+                "_tip": "a" * 40,
+                "_superseded_prs": set(),
+            },
+            {
+                "remote_branch": "stack/story-pr-ready",
+                "_head_ref": "stack/story-pr-ready",
+                "_tip": "b" * 40,
+                "_superseded_prs": {33},
+            },
+        ]
+        manifest = {
+            "repository": "example.test/upstream/repo",
+            "_head_owner": "upstream",
+            "publish_remote": "upstream",
+            "default_base": "main",
+            "base_sha": "a" * 40,
+            "draft": True,
+        }
+        pulls_mock.side_effect = [[], []]
+        remote_mock.return_value = "a" * 40
+
+        with self.assertRaisesRegex(MODULE.SubmitError, "fix the allowlist"):
+            MODULE.github_preflight(Path.cwd(), manifest, layers)
+
+    @mock.patch.object(MODULE, "preflight_integration_pull_request")
+    @mock.patch.object(MODULE, "remote_sha", return_value=None)
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    @mock.patch.object(MODULE, "github_repository_preflight")
     def test_preflight_rejects_existing_pr_with_wrong_component_base(
         self,
         _repository_mock: mock.Mock,
@@ -1676,6 +1821,62 @@ class SubmitterTests(unittest.TestCase):
         )
 
         self.assertIs(reconciled, expected)
+        remote_sha_mock.assert_not_called()
+
+    @mock.patch.object(MODULE, "remote_sha")
+    @mock.patch.object(MODULE, "pull_requests_for_head")
+    def test_reconcile_ignores_superseded_pr_alongside_freshly_created_one(
+        self,
+        pulls_mock: mock.Mock,
+        remote_sha_mock: mock.Mock,
+    ) -> None:
+        """After `gh pr create`, the closed superseded PR and the brand-new PR both exist for
+        the same head; reconcile must filter out the former rather than flag "multiple PRs"."""
+        predecessor = "1" * 40
+        layer = {
+            "remote_branch": "stack/story-pr-ready",
+            "_tip": "2" * 40,
+            "_base_sha": predecessor,
+            "_superseded_prs": {33},
+        }
+        superseded = {
+            "number": 33,
+            "url": "https://example.test/pull/33",
+            "state": "CLOSED",
+            "isDraft": False,
+            "baseRefName": "stack/plan-pr-ready",
+            "baseRefOid": "z" * 40,
+            "headRefName": "stack/story-pr-ready",
+            "headRefOid": "9" * 40,
+            "headRepositoryOwner": "upstream",
+        }
+        fresh = {
+            "number": 42,
+            "url": "https://example.test/pull/42",
+            "state": "OPEN",
+            "isDraft": True,
+            "baseRefName": "stack/plan-pr-ready",
+            "baseRefOid": predecessor,
+            "headRefName": "stack/story-pr-ready",
+            "headRefOid": "2" * 40,
+            "headRepositoryOwner": "upstream",
+        }
+        pulls_mock.return_value = [superseded, fresh]
+        manifest = {
+            "repository": "example.test/owner/repo",
+            "_head_owner": "upstream",
+            "default_base": "main",
+            "base_sha": "0" * 40,
+        }
+
+        reconciled = MODULE.reconcile_created_pull_request(
+            Path.cwd(),
+            manifest,
+            layer,
+            "stack/plan-pr-ready",
+        )
+
+        self.assertIs(reconciled, fresh)
         remote_sha_mock.assert_not_called()
 
     @mock.patch.object(MODULE, "validate_manual_links_live")

@@ -1174,6 +1174,12 @@ def validate(repo: Path, path: Path, manifest: dict[str, Any]) -> list[dict[str,
         if missing:
             raise SubmitError(f"layer {index + 1} missing: {', '.join(missing)}")
         validate_component_branch_names(layer)
+        superseded_prs = layer.get("superseded_prs", [])
+        if not isinstance(superseded_prs, list) or not all(
+            isinstance(item, int) and item > 0 for item in superseded_prs
+        ):
+            raise SubmitError(f"layer {index + 1} superseded_prs must be a list of positive integers")
+        layer["_superseded_prs"] = set(superseded_prs)
         layer["_tip"] = resolve(repo, layer["tip"])
         if resolve(repo, layer["branch"]) != layer["_tip"]:
             raise SubmitError(f"branch drifted from manifest tip: {layer['branch']}")
@@ -2070,6 +2076,24 @@ def github_preflight(repo: Path, manifest: dict[str, Any], layers: list[dict[str
             manifest["_head_owner"],
             layer["remote_branch"],
         )
+        superseded = layer.get("_superseded_prs", set())
+        if superseded:
+            found_numbers = {pr["number"] for pr in existing}
+            unmatched = superseded - found_numbers
+            if unmatched:
+                raise SubmitError(
+                    f"superseded_prs for {layer['remote_branch']} references PR(s) "
+                    f"{sorted(unmatched)} that do not exist for this head; fix the allowlist"
+                )
+            still_open = [
+                pr["number"] for pr in existing if pr["number"] in superseded and pr["state"] == "OPEN"
+            ]
+            if still_open:
+                raise SubmitError(
+                    f"superseded_prs for {layer['remote_branch']} lists still-OPEN PR(s) "
+                    f"{sorted(still_open)}; only a CLOSED PR may be marked superseded"
+                )
+            existing = [pr for pr in existing if pr["number"] not in superseded]
         if len(existing) > 1:
             raise SubmitError(f"multiple PRs exist for {layer['remote_branch']}")
         if existing:
@@ -2254,6 +2278,7 @@ def reconcile_created_pull_request(
         expected_owner,
         layer["remote_branch"],
     )
+    existing = [pr for pr in existing if pr["number"] not in layer.get("_superseded_prs", set())]
     if not existing:
         return None
     if len(existing) > 1:

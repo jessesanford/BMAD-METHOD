@@ -73,7 +73,8 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
       "tip": "FULL_LOCAL_SHA",
       "title": "feat: add the first feature layer",
       "summary": "The first independently reviewable implementation layer.",
-      "body_file": "02-story-1.md"
+      "body_file": "02-story-1.md",
+      "superseded_prs": [27]
     }
   ]
 }
@@ -115,6 +116,14 @@ Use JSON. Store it and all body files beneath `.git/bmad-submit-prs/<run-id>/`.
   immediately before its colon in rendered files, navigation, and submitted PR titles.
 - `remote_branch` must exactly equal `branch`; this prevents alternate aliases from bypassing the
   `*-pr-ready` placement rule.
+- `superseded_prs` (optional, default `[]`) lists PR numbers for this layer's head that are
+  permanently CLOSED and must be treated as if they never existed — e.g. a PR whose head branch was
+  force-pushed after closing, which GitHub then permanently refuses to reopen. Every listed number
+  must resolve to a PR that (a) currently exists for this exact head and (b) is CLOSED; a number that
+  doesn't match any PR, or that matches one still OPEN, fails closed rather than silently ignoring a
+  live conflict. Only list a PR here after confirming by hand that it cannot be reopened/reused (do
+  not use this to route around a routine "PR already exists" conflict) — this exists specifically for
+  the unreopenable-PR case, not as a general bypass.
 - The first component PR base is `default_base`; each later base is the immediately previous layer's
   `remote_branch`. These are the initial review bases. After a predecessor merges, retarget/restack
   the next PR onto `default_base` and cascade every dependent branch before that PR can merge;
