@@ -1,0 +1,20 @@
+# DO NOT EDIT -- overwritten on every update.
+
+[workflow]
+activation_steps_prepend = []
+activation_steps_append = []
+persistent_facts = ["file:{project-root}/**/project-context.md"]
+on_complete = ""
+
+# Cadence for waiting on a re-requested review after a retarget dismisses approval.
+# Poll on a timer and stop as soon as the review decision reports approved.
+review_poll_interval_seconds = 60
+review_poll_timeout_seconds = 1200
+
+# Reviewers assigned and requested on every layer whose approval a retarget dismisses.
+# Set per-project in _bmad/custom/bmad-land-pr-stack.toml; leave empty to be prompted.
+review_refresh_reviewers = []
+
+# Merge method used for each component layer. A true merge commit keeps each layer's
+# commits intact so remaining heads only need retargeting, not restacking.
+merge_method = "merge"

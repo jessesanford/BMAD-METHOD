@@ -263,7 +263,11 @@ the gate; the default branch always is.
   only after retargeting/restacking the next PR onto the default base and cascading all dependent heads. Without
   that step GitHub would merge the next PR into the predecessor branch. Refresh later PRs so GitHub
   recalculates their diffs, and stop if any prerequisite changes remain. Never delete publish-remote
-  head branches until their PRs merge or close.</action>
+  head branches until their PRs merge or close.
+  When the stack is approved and ready to land, hand the execution of that order to
+  `bmad-land-pr-stack` rather than merging ad hoc: it retargets each successor onto the default branch
+  *before* merging its predecessor, which is what stops GitHub auto-closing the next PR when the
+  merged head branch is deleted.</action>
   <action>If the stack remains unmerged after submission, recommend `bmad-stack-working-branch` as
   the default way to provision or refresh the clean local anchor branch for new interim work. Do not
   suggest starting fresh issue work from `main` or directly on a review-only `-pr-ready` branch.</action>
